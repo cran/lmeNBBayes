@@ -1,0 +1,10 @@
+d3f5649b2fa2ee60ee79f2caa40572ad *DESCRIPTION
+13244078746931d0b92c830918a562b8 *NAMESPACE
+3a5ce0cb1dbca67291ba1fad56839f0a *R/nbinDPmix_C.R
+123a66afc9ec974de585966e7b929599 *man/dqmix.Rd
+db96713b550fa6f4a6b51930ec74acc1 *man/getDIC.Rd
+1252a6425e0189b3db8582e6a7e6b858 *man/index_batch_Bayes.Rd
+f252d8ee4ed73650f65134cbafc5ed5a *man/lmeNBBayes-internal.Rd
+f7da0effbc459681f97377324e9711a6 *man/lmeNBBayes.Rd
+d3185a9792e816701ea9fd0e33b991aa *man/metaMultGibb.Rd
+697feead0da8e312cdf5d9523dc5f6e8 *src/nbinDPmix.c

@@ -1,10 +1,167 @@
-## This script contains the successful example of the code: 
-## Data structure:
-## no new scan, ni=10;sp1=0.5;sp2=3;Ntot=200 set.seed(1)-set.seed(10)
-logL <- function(Y,ID,
+## ===== Subroutines for multMeta =========
+cov2corNA <- function(x)
+{
+  cv2cr <- x
+  cv2cr[!is.na(x)] <- cov2cor(matrix(x[!is.na(x)],
+                                     nrow=sum(!is.na(x)[1,]),
+                                     ncol=sum(!is.na(x)[,1])))
+  ##diag(cv2cr) <- 1
+  return(cv2cr)
+}
+
+listSum <- function(listobj,burnin=0)
+  {
+    objex <- listobj[[1]]
+    output <- rep(0,length(c(objex)))
+    for (i in (burnin+1) : length(listobj))
+      {
+        lsO <- c(listobj[[i]])
+        lsONA.TF <- !is.na(lsO)
+        output[lsONA.TF] <- output[lsONA.TF] + lsO[lsONA.TF]
+      }
+    return (matrix(output,
+                   nrow=nrow(objex),
+                   ncol=ncol(objex)))
+  }
+
+multMeta <- function(hat.betas,hat.sigmas2,want.mu=TRUE)
+  {
+    ## hat.betas: Ndim by Ndat matrix, each column contains estimated betas from a study, missing values are accepted
+    ## hat.sigmas2: list of size Ndat, each element contains a estimated covariance matrix of estimator beta.
+    ##              The dimensions must agree with the maximum dimension of hat.betas among studies
+    ##              missing values are accepted
+
+    ## Compute correlation of hat.betas from their covariance matrix
+    corPhi <- lapply(hat.sigmas2,cov2corNA)
+
+    Ndim <- nrow(hat.betas)
+    Ndat <- ncol(hat.betas)
+    if (is.null(rownames(hat.betas)))  rownames(hat.betas) <- paste("beta",1:nrow(hat.betas),sep="")
+    
+    ro.inv.phi2s <- inv.phi2s <- inv.phi4s <- Q <- bar.betas <- matrix(NA,nrow=Ndim,ncol=Ndim)
+    colnames(inv.phi4s) <- rownames(inv.phi4s) <- colnames(inv.phi2s) <- rownames(inv.phi2s) <-
+      colnames(Q) <- rownames(Q) <- colnames(bar.betas) <- rownames(bar.betas) <- rownames(hat.betas)
+    for (idim1 in 1 : Ndim)
+      {
+        betas <- hat.betas[idim1,] ## A vector of length N-study
+
+        ## Extract the var(hat.beta[idim1]) for each study then obtain the vector of 1/SE(hat.beta[idim1,istudy]) istudy=1,..,Ndat length Ndat
+        inv.phi1s.1 <- 1/sqrt(unlist(lapply(hat.sigmas2,function(x) x[idim1,idim1])))
+        for (idim2 in 1 : Ndim)
+          {
+            ## Extract the var(hat.beta[idim2]) similarly
+            inv.phi1s.2 <- 1/sqrt(unlist(lapply(hat.sigmas2,function(x) x[idim2,idim2])))
+            ## sum_{istudy=1}^{Ndat} 1/[ SE(hat.beta[idim1,istudy])*SE(hat.beta[idim2,istudy])]
+            inv.phi2s[idim1,idim2] <- sum(inv.phi1s.1*inv.phi1s.2,na.rm=TRUE)
+            ## will be used for the computation of var(beta) (out side of this loop)
+            ros <- unlist(lapply(corPhi,function(x) x[idim1,idim2]))
+            ro.inv.phi2s[idim1,idim2] <- sum(ros*(inv.phi1s.1*inv.phi1s.2),na.rm=TRUE)
+            inv.phi4s[idim1,idim2] <- sum((inv.phi1s.1*inv.phi1s.2)^2,na.rm=TRUE)
+            ## Contains bar.beta1 in its diagonal. The off-diagonal entries contain the estimates of bar.beta2 
+            bar.betas[idim1,idim2] <- sum(  betas*(inv.phi1s.1*inv.phi1s.2),na.rm=TRUE)/inv.phi2s[idim1,idim2]
+          }
+      }
+    ## Compute the Q-statistics
+    for (idim1 in 1 : Ndim)
+      {
+        betas1 <- hat.betas[idim1,]
+        phi1s.1 <- sqrt(unlist(lapply(hat.sigmas2,function(x) x[idim1,idim1])))
+        for (idim2 in 1 : Ndim)
+          {
+            betas2 <- hat.betas[idim2,]
+            phi1s.2 <- sqrt(unlist(lapply(hat.sigmas2,function(x) x[idim2,idim2])))
+            bar.beta1 <- bar.betas[idim1,idim2] 
+            bar.beta2 <- bar.betas[idim2,idim1]
+
+            Q[idim1,idim2] <- sum( (betas1-bar.beta1)*(betas2-bar.beta2)/(phi1s.1*phi1s.2),na.rm=TRUE)
+          }
+      }
+
+    num <- Q - listSum(corPhi) + ro.inv.phi2s/inv.phi2s
+    den <- inv.phi2s - inv.phi4s/inv.phi2s
+    info.var <- num/den
+    
+    aPD<- adjustPosDef(info.var)
+    note <- aPD$note
+    info.var <- aPD$adjust.mat
+    colnames(info.var) <- rownames(info.var) <- rownames(hat.betas)
+    
+    if (want.mu)
+      { 
+        varHatMu0 <- list()
+        nums <- matrix(NA,ncol=Ndat,nrow=Ndim)
+        dim.full <- nrow(hat.sigmas2[[1]])
+        for (istudy in 1 : Ndat)
+          {
+            sig <- hat.sigmas2[[istudy]]
+            ## reduced matrix that only contains the non missing entries
+            which.notNA <- !is.na(sig[,1])
+            dim.red <- sum(which.notNA)
+            sig.red <- matrix(sig[!is.na(sig)],nrow=dim.red)
+            info.var.red <- matrix(info.var[!is.na(sig)],nrow=dim.red)
+            inv.var <- solve(info.var.red + sig.red)
+            varHatMu0[[istudy]] <- cbind(rbind(inv.var,matrix(NA,nrow=dim.full-dim.red,ncol=dim.red)),
+                                         matrix(NA,nrow=dim.full,ncol=dim.full-dim.red))
+            nums[which.notNA,istudy] <-inv.var%*%hat.betas[which.notNA,istudy]
+          }
+        varHatMu <- solve(listSum(varHatMu0))
+        info.mean <- c( varHatMu%*%rowSums(nums,na.rm=TRUE))
+        
+        SEmu <- sqrt(diag(varHatMu))
+        names(SEmu) <-  paste("SE:",rownames(hat.betas))
+        names(info.mean) <- rownames(hat.betas)
+      }else{
+        SEmu <- info.mean <- NULL
+      }
+
+    return(list(info.mean=info.mean,info.var=info.var,SEmu=SEmu,note=note))
+  }
+## ==============
+
+adjustPosDef <- function(mat,add=1e-10)
+  {
+    eg <- eigen(mat)
+    if(sum(eg$values<0)>0)
+      {
+        note <- "The non positive semi-definite-ness is adjusted by the truncation"
+        adjust.mat <- 0
+        for (i in 1 : length(eg$values))
+          adjust.mat <- adjust.mat + max(c(eg$values[i],add))*outer(eg$vector[,i],eg$vector[,i])
+      }
+    return(list(adjust.mat=adjust.mat,note=note))
+  }
+
+aggBeta <- function(bets,piTRT)
+  {
+    if (is.vector(bets)) bets <- matrix(bets,nrow=1)
+    log(exp(bets[,1])*(1-piTRT)+exp(bets[,2])*piTRT)
+  }
+
+rTildeBeta <- function(N.MC=1e+6,piTRT=0.6736842,
+              info.mean,info.var){
+  samp <- rmvnorm(n=N.MC, mean = info.mean, sigma = info.var)
+  which.plcb <- c(2,4,6)
+  which.trt <- which.plcb + 1
+  alpha <- samp[,1]
+  betas.plcb <- samp[,which.plcb]
+  betas.trt <- samp[,which.trt]
+  betatilde <- matrix(NA,nrow=N.MC,ncol=length(which.plcb))
+  for (itime1 in 1 : ncol(betatilde))
+    {
+      betatilde[,itime1]<-aggBeta(bets=cbind(betas.plcb[,itime1],betas.trt[,itime1]),piTRT=piTRT) 
+    }
+  re <- cbind(alpha,betatilde)
+
+  colnames(re) <- c("alpha",paste("tildeBeta",1:length(which.plcb),sep=""))
+  return(re)
+}
+
+
+logL.G <- function(Y,ID,
                  X,vec.beta,vec.gPre
                  )
   {
+    ## focused likelihood Pr(Yij | beta, G)
     ## gPre, gNre is a vector of length N
     ## if (is.null(vec.gNew)) labelnp <- rep(0,length(Y))
 
@@ -19,19 +176,18 @@ logL <- function(Y,ID,
         iX <- X[ID==patID,,drop=FALSE]
         i.gPre <- vec.gPre[ipat]
         logL <- logL + sum(dnbinom(iY,
-                                   size=exp(iX%*%vec.beta),
-                                   prob=i.gPre,
-                                   log=TRUE)
-                           )
+                                   size=exp(iX%*%vec.beta),prob=i.gPre,
+                                   log=TRUE))
       }
     return (logL)
   }
 
-logL2 <- function(Y,ID,
+logL.aGh.rGh <- function(Y,ID,
                   X,vec.beta,
                   vec.aGs,vec.rGs ## LENGTH OF N
                   )
   {
+    ## focused likelihood Pr(Yij | beta, aGs[h], rGs[h])
     ## gPre, gNre is a vector of length N
     ## if (is.null(vec.gNew)) labelnp <- rep(0,length(Y))
     
@@ -53,6 +209,157 @@ logL2 <- function(Y,ID,
     return (logL)
   }
 
+
+
+llk.FG_i <- function(ys,rs,aGs,bGs,ps)
+{
+  ## Pr( {Yij}_j=1^ni | beta, F_G )
+  ##     = prod_{j=1}^ni choose(rij+yij-1,yij)*sum_ih^M ps[ih]*beta(r_ip+ +aGs[ih], y_ip+ +bGs[ih])/beta(aGs[ih],bGs[ih])
+  ## ys: length ni
+  ## rs: length ni
+  ## aGs: length M
+  ## rGs: length M
+  ## ps: length M
+  temp <- sum(log(choose(rs+ys-1,ys)))
+  temp2 <- log(sum(ps*beta(sum(rs)+aGs,sum(ys)+bGs)/beta(aGs,bGs)))
+  return(temp+temp2)
+}
+llk.FG <- function(Ys,Xs,ID,mat.beta,mat.aGs,mat.bGs,mat.ps)
+  {
+    ## mat.aGs: B* by M where B* = length(useSample)
+    ## mat.bGs: B* by M
+    ## mat.ps:  B* by M
+    uniID <- unique(ID)
+    llkeach <- rep(NA,nrow(mat.aGs))
+    for (iB in 1 : nrow(mat.aGs))
+      {
+        beta <- mat.beta[iB,]
+        aGs <- mat.aGs[iB,]
+        bGs <- mat.bGs[iB,]
+        ps <- mat.ps[iB,]
+
+        temp.llk <- 0
+        for (ipat in 1 : length(uniID))
+          {
+            Yi <- Ys[ID==uniID[ipat]]
+            Xi <- Xs[ID==uniID[ipat],,drop=FALSE]
+            
+            rs <- exp(Xi%*%beta) ## length ni
+            temp.llk <- temp.llk + llk.FG_i(ys=Yi,rs=rs,aGs=aGs,bGs=bGs,ps=ps)
+          }
+        llkeach[iB] <- temp.llk
+      }
+    return(llkeach)
+  }
+
+getDIC.FG <- function(olmeNBBayes, data, ID, useSample, lower.alpha=0.0001,upper.alpha=0.99999,inc.alpha=0.0005)
+  {
+    ## focused likelihood = P( Yi | beta, F_G )
+    alphas <- seq(lower.alpha,upper.alpha,inc.alpha)
+    ## focused likelihood integrates out the component labels
+    ## P( Yij, j=1,..,ni | beta, RE dist)
+    formula <- olmeNBBayes$para$formula
+    X <- model.matrix(object = formula, data = data)
+    Y <- model.response(model.frame(formula = formula, data = data))
+
+    if (olmeNBBayes$para$DP == 0) stop("Use getDIC for parametric Bayesian procedure")
+    if (is.vector(olmeNBBayes$beta)) 
+        olmeNBBayes$beta <- matrix(olmeNBBayes$beta, ncol = 1)
+    
+    D.bar <- -2*mean(llk.FG(Ys=Y,Xs=X,ID=ID,
+                            mat.beta = olmeNBBayes$beta[useSample,, drop = FALSE],
+                            mat.aGs  = olmeNBBayes$aGs[useSample,, drop = FALSE],
+                            mat.bGs = olmeNBBayes$rGs[useSample,, drop = FALSE],
+                            mat.ps = olmeNBBayes$weightH1[useSample,,drop=FALSE]))
+    ## compute the Pr( {Yij}_[j=1}^ni | bar.beta, bar.F_G)
+    ## return a length(alphas) by length(B) matrix
+    qM <- dqmix(
+                weightH1 = olmeNBBayes$weightH1[useSample,],
+                aGs = olmeNBBayes$aGs[useSample,],
+                rGs = olmeNBBayes$rGs[useSample,],
+                alphas = alphas, ## the grid of points at which the density is evaluated
+                dens=TRUE
+                )[[1]]
+    ## bar.F_G is computed by averaging the estimated density at each grid of points
+    aggregate.dens <- colMeans(qM)
+    ## bar.beta is average of beta^{(b)} after thinning 
+    aggregate.beta <- colMeans(olmeNBBayes$beta[useSample,,drop=FALSE])
+
+    llk.pat <- 0
+    uniID <- unique(ID)
+    for (ipat in 1 : length(uniID))
+      {
+        ys <- Y[ID==uniID[ipat]]
+        xs <- X[ID==uniID[ipat],,drop=FALSE]
+        rs <- exp(xs%*%aggregate.beta)
+        ## Pr( {Yij}_j=1^ni | bar.beta, bar.F_G) = int_0^1 prod_{j=1}^ni Pr( Yij | bar.beta, g) bar.f_G(g) dg
+        vec.dens <- rep(NA,length(alphas))
+        for (ialpha in 1 : length(alphas)){
+          vec.dens[ialpha]<- prod(dnbinom(ys,size=rs,prob=alphas[ialpha]))*aggregate.dens[ialpha]
+        }
+        llk.pat <- llk.pat + log(sum(vec.dens*inc.alpha))
+      }
+    D.hat <- -2 *llk.pat
+    effect.para <- D.bar - D.hat
+    DIC <- effect.para + D.bar
+    return(list(DIC = DIC, effect.para = effect.para))
+  }
+
+
+getDIC_aGh.rGh.G <- function(olmeNBBayes,data,ID,useSample)
+{
+  formula <- olmeNBBayes$para$formula
+  X <- model.matrix(object=formula,data=data)
+  Y <- model.response(model.frame(formula=formula,data=data))
+  ## The effective number of parameters of the model is computed
+  ## Dbar: posterior mean of the deviance bar(-2*logLlik)
+  D.bar <- -2*mean(olmeNBBayes$logL[useSample]) ## + constant
+  ## Dhat: -2*logLik(theta.bar)
+  if (is.vector(olmeNBBayes$beta)) olmeNBBayes$beta <- matrix(olmeNBBayes$beta,ncol=1)
+  ##if (is.vector(olmeNBBayes$gNew)) olmeNBBayes$gNew <- matrix(olmeNBBayes$gNew,ncol=1)
+  if (olmeNBBayes$para$Reduce){
+    if (olmeNBBayes$para$DP==0)
+      {
+        ## parametric procedure:
+        olmeNBBayes$aGs_pat <- matrix(olmeNBBayes$aG,nrow=length(olmeNBBayes$aG),ncol=length(unique(ID)))
+        olmeNBBayes$rGs_pat <- matrix(olmeNBBayes$rG,nrow=length(olmeNBBayes$rG),ncol=length(unique(ID)))
+      }
+    ## Pr( { Yij }_j=1^ni | beta, aGh, rGh)
+    D.hat <- -2*logL.aGh.rGh(Y=Y,ID=ID,X=X,
+                             vec.beta = colMeans(olmeNBBayes$beta[useSample,,drop=FALSE]), 
+                             vec.aGs = colMeans(olmeNBBayes$aGs_pat[useSample,,drop=FALSE]),
+                             vec.rGs = colMeans(olmeNBBayes$rGs_pat[useSample,,drop=FALSE])
+                             )
+  }else{
+    ## Pr( { Yij }_j=1^ni | beta, G)
+    D.hat <- -2*logL.G(Y=Y,ID=ID,X=X,
+                     vec.beta = colMeans(olmeNBBayes$beta[useSample,,drop=FALSE]),
+                     vec.gPre = colMeans(olmeNBBayes$g1s[useSample,,drop=FALSE])
+                     )
+  }
+  effect.para <- D.bar - D.hat
+  DIC <- effect.para + D.bar
+  return (list(DIC=DIC,effect.para=effect.para))
+}
+
+
+getDIC <- function(olmeNBBayes, data,
+                  ID, useSample=NULL,focus = c("FG","G","aGh.rGh","para"), 
+                  lower.alpha=0.0001,upper.alpha=0.99999,inc.alpha=0.0005){
+  if (length(focus)==1) focus <- focus[1]
+  if (is.null(useSample)) useSample <- 1 : olmeNBBayes$para$B
+  ## Pr(Yij | beta, aGs[h], rGs[h], pis[ih], ih=1,...,M ) works only for semiparametric procedure
+  if (focus== "FG")
+    re <- getDIC.FG(olmeNBBayes=olmeNBBayes, data=data,
+                    ID=ID, useSample=useSample,
+                    lower.alpha=lower.alpha,upper.alpha=upper.alpha,inc.alpha=inc.alpha)
+  ## Pr(Yij | beta, aGs[h], rGs[h], pis[ih])
+  ## Pr(Yij | beta, G)
+  if (focus %in% c("G","aGh.rGh","para"))
+    re <- getDIC_aGh.rGh.G(olmeNBBayes=olmeNBBayes,data=data,
+                           ID=ID,useSample=useSample)
+  return(re)
+}
 
 index.batch.Bayes <- function(data,labelnp,ID,olmeNBBayes,thin=NULL,printFreq=10^5,unExpIncrease=TRUE)
   {
@@ -172,42 +479,6 @@ condProbCI <- function(ID,condProb)
   }
 
 
-getDIC <- function(olmeNBBayes,data,ID,useSample)
-{
-  formula <- olmeNBBayes$para$formula
-  X <- model.matrix(object=formula,data=data)
-  Y <- model.response(model.frame(formula=formula,data=data))
-  ## The effective number of parameters of the model is computed
-  ## Dbar: posterior mean of the deviance bar(-2*logLlik)
-  D.bar <- -2*mean(olmeNBBayes$logL[useSample]) ## + constant
-  ## Dhat: -2*logLik(theta.bar)
-  if (is.vector(olmeNBBayes$beta)) olmeNBBayes$beta <- matrix(olmeNBBayes$beta,ncol=1)
-  ##if (is.vector(olmeNBBayes$gNew)) olmeNBBayes$gNew <- matrix(olmeNBBayes$gNew,ncol=1)
-  if (olmeNBBayes$para$Reduce){
-    if (olmeNBBayes$para$DP==0)
-      {
-        ## parametric procedure:
-        olmeNBBayes$aGs_pat <- matrix(olmeNBBayes$aG,nrow=length(olmeNBBayes$aG),ncol=length(unique(ID)))
-        olmeNBBayes$rGs_pat <- matrix(olmeNBBayes$rG,nrow=length(olmeNBBayes$rG),ncol=length(unique(ID)))
-      }
-    
-    D.hat <- -2*logL2(Y=Y,ID=ID,X=X,
-                      vec.beta = colMeans(olmeNBBayes$beta[useSample,,drop=FALSE]), 
-                      vec.aGs = colMeans(olmeNBBayes$aGs_pat[useSample,,drop=FALSE]),
-                      vec.rGs = colMeans(olmeNBBayes$rGs_pat[useSample,,drop=FALSE])
-                     )
-  }else{
-    D.hat <- -2*logL(Y=Y,ID=ID,X=X,
-                     vec.beta = colMeans(olmeNBBayes$beta[useSample,,drop=FALSE]),
-                     vec.gPre = colMeans(olmeNBBayes$g1s[useSample,,drop=FALSE])
-                     )
-  }
-  effect.para <- D.bar - D.hat
-  DIC <- effect.para + D.bar
-  return (list(DIC=DIC,effect.para=effect.para))
-}
-
-
 
 newCat <- function(label1,label2)
   {
@@ -269,25 +540,618 @@ slim <- function(vec,ID)
 
     uniID <- unique(ID)
     re <- rep(NA,length(uniID))
-    for (i in uniID) re[i] <- vec[ID==i][1]
+    for (i in 1 : length(uniID))
+      {
+        re[i] <- vec[ID==uniID[i]][1]
+      }
     
     return(re)
   }
 
 
-test <- function(x,mu,Sigma)
+
+intfun <-  function(D,mx,N)  D*log(1+N/D)/mx
+E.KN <- function(maxDs,N)
   {
-    InvSigma <- solve(Sigma)
-    evalue <- eigen(Sigma, symmetric = TRUE, only.values = TRUE)$values
-    .Call("tempFun",
-          as.numeric(x),
-          as.numeric(mu),
-          as.integer(length(mu)),
-          as.numeric(evalue),
-          as.numeric(c(InvSigma)),
-          package ="lmeNBBayes")
+    ## compute E(K|N) v.s. mD under D ~ unif(0,mD)
+    re <- rep(NA,length(maxDs))
+    for (i.maxD in 1 : length(maxDs)){
+      mx <- maxDs[i.maxD]
+      re[i.maxD] <- integrate(intfun,lower=0.00,upper=mx,mx=mx,N=N)$value
+    }
+    return (re)
   }
 
+lmeNBBayes <- function(formula,          ##   A vector of length sum ni, containing responses
+                       data,
+                       ##   A sum ni by p matrix, containing covariate values. The frist column must be 1 (Intercept)
+                       ID,         ##   A Vector of length sum ni, indicating patients
+                       B = 105000, ##     A scalar, the number of Gibbs iteration 
+                       burnin = 5000,  
+                       printFreq = B,
+                       M = NULL,
+                       probIndex = FALSE,
+                       thin =1, ## optional
+                       labelnp=NULL, ## necessary if probIndex ==1
+                       epsilonM = 1e-4,## nonpara
+                       para = list(mu_beta = NULL,Sigma_beta = NULL,a_D = 0.0001, ib_D = 3,max_aG=30),
+                       DP=TRUE,
+                       Reduce=1,
+                       thinned.sample=FALSE
+                       )
+  {
+    ##set.seed(seed)
+    
+    Xmodmat <- model.matrix(object=formula,data=data)
+    covariatesNames<- colnames(Xmodmat)
+    Y <- model.response(model.frame(formula=formula,data=data))
+    ## If ID is a character vector of length sum ni,
+    ## it is modified to an integer vector, indicating the first appearing patient
+    ## as 1, the second one as 2, and so on..
+
+    ## This code generate samples from NBRE model with constant random effect ~ DP mixture of Beta
+    if (is.vector(Xmodmat)) Xmodmat <- matrix(Xmodmat,ncol=1)
+    NtotAll <- length(Y)
+    if (nrow(Xmodmat)!= NtotAll) stop ("nrow(Xmodmat) ! = length(Y)")
+    if (length(ID)!= NtotAll)  stop ("length(ID)! = length(Y)")
+    if (!is.null(labelnp) & length(labelnp)!= NtotAll)  stop ("labelnp! = length(Y)")
+    if (thinned.sample & (!is.numeric(thin)) & (!is.numeric(burnin)))
+      stop("If you only want thinned samples, you must give the thinning and burnin parameters")
+    if (thinned.sample & (!Reduce))
+      stop("Non-reduced MCMC must return ALL samples")
+    dims <- dim(Xmodmat)
+    Ntot <- dims[1]
+    pCov <- dims[2]
+    ## cat("pCov",pCov)
+    if (is.null(para$mu_beta)) para$mu_beta <- rep(0,pCov)
+    if (is.null(para$Sigma_beta)) para$Sigma_beta <- diag(10,pCov)
+    if (is.null(para$a_D )) para$a_D <- 1e-4
+    if (is.null(para$ib_D)) para$ib_D <- 0.5
+    if (is.null(para$max_aG)) para$max_aG <- 30
+    if (length(para$mu_beta)!=ncol(Xmodmat))
+      stop("The dimension of the fixed effect hyperparameter is wrong!")
+    
+    if (is.null(M)) M  <- round(1 + log(epsilonM)/log(para$ib_D/(1+para$ib_D)))
+    
+    evalue_sigma_beta <- eigen(para$Sigma_beta, symmetric = TRUE, only.values = TRUE)$values
+    if (min(evalue_sigma_beta) <= 0) stop("Sigma_beta must be positive definite!")
+    Inv_sigma_beta <- c( solve(para$Sigma_beta) )
+
+    X <- c(Xmodmat) ## {xij} = { x_{1,1},x_{2,1},..,x_{Ntot,1},x_{1,2},....,x_{Ntot,p} }
+
+    ## change the index of ID to numeric from 1 to # patients
+    temID <- ID  
+    N <- length(unique(temID))
+    uniID <- unique(temID)
+    ID <- rep(NA,length(temID))
+    for (i in 1 : length(uniID))
+      {
+        ID[temID == uniID[i]] <- i
+      }
+    
+    mID <- ID-1
+    ## the labelnp of patients only with 1 (new scans) labels are replaced by all 0 (old scans)
+    
+    maxni <- max(tapply(rep(1,length(ID)),ID,sum))
+    Npat <- length(unique(ID))
+    
+    if (probIndex)
+      {
+        ## the labelnp of patients only with 1 (new scans) labels are replaced by all 0 (old scans)
+        patwonew <- which(as.numeric(tapply((labelnp==0),ID,sum)==0)==1)
+        for (i in 1 : length(patwonew)) labelnp[ID == patwonew[i]] <- 0
+        
+        patwoNorO <-  which(as.numeric(tapply((labelnp==1),ID,sum)==0)==1)
+        if (length(patwoNorO)==0) patwoNorO <- -1000;
+      }else{
+        
+        labelnp <- rep(0,length(Y))
+      }
+      
+    Btilde <- B
+    if (B %% thin != 0 ) stop("B %% thin !=0")
+    if (burnin %% thin !=0) stop("burnin %% thin !=0")
+
+    if (DP)
+      {
+        if (Reduce){
+        re <- .Call("ReduceGibbs",
+                    as.numeric(Y),           ## REAL
+                    as.numeric(X),           ## REAL
+                    as.integer(mID),         ## INTEGER
+                    as.integer(B),           ## INTEGER
+                    as.integer(maxni),       ## INTEGER
+                    as.integer(Npat),        ## INTEGER
+                    as.numeric(labelnp),     ## REAL
+                    as.numeric(para$max_aG),
+                    as.numeric(para$mu_beta),     ## REAL
+                    as.numeric(evalue_sigma_beta),  ## REAL
+                    as.numeric(Inv_sigma_beta),  ## REAL
+                    as.numeric(para$a_D),
+                    as.numeric(para$ib_D),
+                    as.integer(M),
+                    as.integer(burnin),      ## INTEGER
+                    as.integer(printFreq),
+                    as.integer(probIndex),
+                    as.integer(thin),
+                    as.integer(thinned.sample),
+                    package = "lmeNBBayes"
+                    )
+        if (thinned.sample){
+          B <- (B - burnin)/thin
+        }
+        for ( i in 13 : 14 ) re[[i]] <- matrix(re[[i]],B,Npat,byrow=TRUE)
+        names(re) <- c("aGs","rGs","vs","weightH1",
+                       "condProb","h1s","g1s",
+                       "beta",
+                       "D","logL",
+                       "AR","prp","aGs_pat","rGs_pat")
+      }else{
+        re <- .Call("gibbs",
+                    as.numeric(Y),           ## REAL
+                    as.numeric(X),           ## REAL
+                    as.integer(mID),         ## INTEGER
+                    as.integer(B),           ## INTEGER
+                    as.integer(maxni),       ## INTEGER
+                    as.integer(Npat),        ## INTEGER
+                    as.numeric(labelnp),     ## REAL
+                    as.numeric(para$max_aG),
+                    as.numeric(para$mu_beta),     ## REAL
+                    as.numeric(evalue_sigma_beta),  ## REAL
+                    as.numeric(Inv_sigma_beta),  ## REAL
+                    as.numeric(para$a_D),
+                    as.numeric(para$ib_D),
+                    as.integer(M),
+                    as.integer(burnin),      ## INTEGER
+                    as.integer(printFreq),
+                    as.integer(probIndex),
+                    as.integer(thin),
+                    package = "lmeNBBayes"
+                    )
+        names(re) <- c("aGs","rGs","vs","weightH1",
+                       "condProb","h1s","g1s",
+                       "beta",
+                       "D","logL",
+                       "AR","prp")
+      }
+        ## http://stackoverflow.com/questions/8720550/how-to-return-array-of-structs-from-call-to-c-shared-library-in-r
+        ## for ( i in 1:4 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
+        for ( i in 1 : 4 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
+        re[[5]]  <- matrix(re[[5]],(Btilde-burnin)/thin,Npat,byrow=TRUE)
+        for ( i in 6 : 7 ) re[[i]] <- matrix(re[[i]],B,Npat,byrow=TRUE)
+        re[[8]] <- matrix(re[[8]],B,pCov,byrow=TRUE)
+ 
+        if (probIndex)
+          {
+            ## patients with no new scans
+            if (sum(patwoNorO < 0) > 1) patwoNorO <- NULL
+            re$condProb[,patwoNorO] <- NA
+          }
+        re$para$max_aG <- para$max_aG
+        re$para$a_D <- para$a_D
+        re$para$ib_D <- para$ib_D
+        re$para$M <- M
+        names(re$AR) <-c("aG", "rG","beta","D")
+      }else{
+        if (Reduce){
+          re <- .Call("Beta1reduce",
+                      as.numeric(Y),           ## REAL
+                      as.numeric(X),           ## REAL
+                      as.integer(mID),         ## INTEGER
+                      as.integer(B),           ## INTEGER
+                      as.integer(maxni),       ## INTEGER
+                      as.integer(Npat),        ## INTEGER
+                      as.numeric(labelnp),     ## REAL
+                      as.numeric(para$max_aG),
+                      as.numeric(para$mu_beta),     ## REAL
+                      as.numeric(evalue_sigma_beta),  ## REAL
+                      as.numeric(Inv_sigma_beta),  ## REAL
+                      as.integer(burnin),      ## INTEGER
+                      as.integer(printFreq),
+                      as.integer(probIndex),
+                      as.integer(thin),
+                      as.integer(thinned.sample),
+                      package = "lmeNBBayes"
+                    )
+          if (thinned.sample){
+            B <- (B - burnin)/thin
+          }
+        }else{
+        re <- .Call("Beta1",
+                    as.numeric(Y),           ## REAL
+                    as.numeric(X),           ## REAL
+                    as.integer(mID),         ## INTEGER
+                    as.integer(B),           ## INTEGER
+                    as.integer(maxni),       ## INTEGER
+                    as.integer(Npat),        ## INTEGER
+                    as.numeric(labelnp),     ## REAL
+                    as.numeric(para$max_aG),
+                    as.numeric(para$mu_beta),     ## REAL
+                    as.numeric(evalue_sigma_beta),  ## REAL
+                    as.numeric(Inv_sigma_beta),  ## REAL
+                    as.integer(burnin),      ## INTEGER
+                    as.integer(printFreq),
+                    as.integer(probIndex),
+                    as.integer(thin),
+                    package = "lmeNBBayes"
+                    )
+      }
+        ## http://stackoverflow.com/questions/8720550/how-to-return-array-of-structs-from-call-to-c-shared-library-in-r
+        ## for ( i in 1:4 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
+        re[[3]] <- matrix(re[[3]],B,Npat,byrow=TRUE)
+        re[[4]] <- matrix(re[[4]],B,pCov,byrow=TRUE)
+        re[[7]]  <- matrix(re[[7]],(Btilde-burnin)/thin,Npat,byrow=TRUE)
+        names(re) <- c("aG","rG",
+                       "g1s",
+                       "beta",
+                       "AR","prp",
+                       "condProb",
+                       "logL"
+                       )
+        if (probIndex)
+          {
+            ## patients with no new scans
+            if (sum(patwoNorO < 0) > 1) patwoNorO <- NULL
+            re$condProb[,patwoNorO] <- NA
+          }
+        re$para$max_aG <- para$max_aG
+        names(re$AR) <-c("aG", "rG","beta")
+        
+      }
+    if (thinned.sample){
+      thin <- 1
+      burnin <- 0
+    }
+
+    if (probIndex)
+      {
+        re$para$labelnp <- labelnp
+        re$para$CEL <- Y
+        re$para$ID <- temID ## return original IDs
+        re$para$X <- Xmodmat
+        re$condProbSummary <- condProbCI(ID,re$condProb)
+        rownames(re$condProbSummary) <- uniID
+      }
+    re$para$Sigma_beta <- para$Sigma_beta
+    re$para$mu_beta <- para$mu_beta
+    names(re$para$mu_beta) <- rownames(re$para$Sigma_beta) <-
+      colnames(re$para$Sigma_beta) <- colnames(re$beta) <- covariatesNames
+    re$para$B <- B
+    re$para$burnin <- burnin
+    re$para$thin <- thin
+    re$para$probIndex <- probIndex
+    re$para$Reduce <- Reduce
+    re$para$burnin <- burnin
+    re$para$DP <- DP
+    re$para$thinned.sample <- thinned.sample
+    re$para$formula <- formula
+    class(re) <- "LinearMixedEffectNBBayes"
+    return (re)
+  }
+
+
+
+
+
+
+
+
+
+
+print.LinearMixedEffectNBBayes <- function(x,...){
+
+    para <- x$para
+    if (is.vector(x$beta)) pCov <- 1 else pCov <- ncol(x$beta)
+    cat("\n -----Negative binomial mixed effect regression----- ")
+    if (para$DP){
+      cat("\n ---random effect is from DP mixture of beta distributions---")
+    }else{
+      cat("\n ---random effect is from a single beta distribution---")
+    }
+
+    cat("\n====INPUT==== ")
+
+    cat("\n formula: ");print(para$formula)
+    if (is.null(para$thin))
+      para$thin <- 1
+    cat(paste(" MCMC parameters: B=",para$B,", burnin=",para$burnin,", thin=",para$thin,sep=""))
+    if (para$Reduce)
+      {
+        cat("\n The target distribution in McMC is a partially marginalized posterior distribution")
+        cat("\n (random effects are integrated out).")
+      }
+    cat("\n ------------------")
+    cat("\n [[Hyperparameters]] ")
+    cat("\n [Fixed Effect]       ")
+    cat("\n beta ~ multivariate normal with mean and covariance matrix:\n  ")
+    muSigma <- data.frame(para$mu_beta,"   |   ",para$Sigma_beta);
+    colnames(muSigma) <- c("mean","   |   ","covariance",rep(" ",pCov-1))
+    rownames(muSigma) <- names(para$mu_beta)
+    print(muSigma)
+    
+    cat(paste(" [Random effect dist'n] aG,rG ~ Unif(min=",0.5,", max=",para$max_aG,")",sep=""))
+    if (para$DP){
+      cat(paste("\n [Precision parameter]      D ~ Unif(min=",para$a_D,", max=",para$ib_D,")",sep=""))
+      cat(paste("\n [Truncation parameter]     M = ",para$M,sep=""))
+    }
+
+    
+    if (!is.null(para$thin))
+      {
+        useSample <- useSamp(B=para$B,thin=para$thin,burnin=para$burnin)
+        useSampleAll <- FALSE
+      }
+ 
+    cat("\n====OUTPUT====")
+
+    cat("\n [Fixed effect]")
+    if (para$DP){
+       cat(" and [Precision parameter] \n")
+       bb <- cbind(x$beta[useSample,],x$D[useSample])
+       row.names =  c( names(para$mu_beta),"D")
+    }else{
+      cat("\n")
+      bb <- cbind(x$beta[useSample,])
+       row.names = names(para$mu_beta)
+    }
+    bsummary <- data.frame(colMeans(bb),apply(bb,2,sd),t(apply(bb,2,quantile,prob=c(0.025,0.975))),
+                           row.names =  row.names)
+    colnames(bsummary) <- c("Estimate","Std. Error","lower CI","upper CI")
+    print(round(bsummary,4))
+    cat("-----------------")
+    cat("\n Reported estimates are posterior means computed after discarding burn-in")
+    if (para$thin==1){
+      cat(". No Thinning.")
+    }else{
+      cat(paste(" and thinning at every ",para$thin," samples.",sep=""))
+    }
+    cat("\n Posterior mean of the logLikelihood",mean(x$logL[useSample]))
+    cat("\n Acceptance Rate in Metropolice Hasting rates")
+    cat("\n ",paste(names(x$AR),round(x$AR,4),sep=":"))
+
+    if (para$probIndex)
+      {
+        cat("\n-----------------\n")
+        cat("\n ===== Conditional probability index ======\n")
+        prIndex(x)
+      }
+  }
+
+
+
+
+print.IndexBatch <- prIndex <- function(x,...)
+  {
+    condProb <- x$condProbSummary
+    ID <- x$para$ID
+    uniID <- unique(ID)
+    CEL <- x$para$CEL
+    labelnp <- x$para$labelnp
+    ## condProb:: A length(uniID) by 3 matrix, first column: a point estimate,
+    ## the second column lower CI, the third column upper CI
+    ## index of patient, reorder the patients in the increasing ways of probability index1 
+    Suborderps <- order(condProb[,1])
+    ## ps[order(ps)[1]] == min(ps)
+    ## contains the index (1,2,...,Npat) of pat in decreasing way of index1
+    orderps <- uniID[Suborderps]
+    ## contains the ID (integer but the increment is not always 1) of pat in increasing way
+    r <- NULL
+    patwoNO <- patwNew0 <- rep(NA,length(uniID))
+    ## m1G_1 must be > 0
+    ## \hat{ E(1/G) } - 1
+    ii <- rep(NA,length(uniID))
+    for (i in 1 : length(uniID) )
+      {
+        i.orderp <- orderps[i]
+        pickedIndex <- ID==i.orderp
+        ## vector of length ID, containing TRUE if the position agree with the observations of ID orderps[i]
+        pickedpt <- which(uniID==i.orderp)
+        ## single element indicating the position of the orderps[i] in uniID
+        CELpat <- CEL[pickedIndex]
+        labelnppat <- labelnp[pickedIndex]
+        CELpat0 <- CELpat[labelnppat==0]
+        CELpat1 <- CELpat[labelnppat==1]
+        if (length(CELpat0)==0) CELpat0 <- "--"
+        if (length(CELpat1)==0)
+          {
+            CELpat1 <- "--"
+            patwNew0[i] <- FALSE
+          }else
+        patwNew0[i] <- sum(CELpat1)>0 ## TRUE if patients have sum of CEL counts on new scan greater than zero
+        ## Patients with no new/old scans are omitted at the end
+        patwoNO[i] <- !is.na(condProb[pickedpt,1]) ## TRUE if patients have a new scan and old scan  
+        r <- rbind(r,
+                   c(
+                     "pre-Scan"=paste(CELpat0,collapse="/"),
+                     "new-Scan"=paste(CELpat1,collapse="/")
+                     )
+                   )
+        ## ======== printable format =========;
+        ii[i] <- paste(sprintf("%1.3f",condProb[pickedpt,1]),
+                         " (",sprintf("%1.3f",condProb[pickedpt,3]),
+                         ",",sprintf("%1.3f",condProb[pickedpt,4]),")",sep="")
+      }
+    
+    outp <- cbind(ii,r)
+    colnames(outp) <- c("conditional probability","pre-scan","new-scan")
+    rownames(outp) <- orderps
+
+    cat("\n Estimated conditional probability index and its 95 % CI.")
+    if (!is.null(x$para$qsum))
+      cat("\n The scalar function to summarize new scans:",x$para$qsum)
+    cat("\n-----------------\n")
+    print(data.frame(outp[patwoNO&patwNew0,,drop=FALSE]))
+    cat("\n-----------------")
+    cat("\n Patients are ordered by decreasing conditional probability.")
+    cat("\n Patients with no pre-scans or no new scans are not reported.")
+    cat("\n Patients whose new scans are all zero are not reported as conditional probability of such patients are always one.")
+  }
+    
+
+
+UsedPara <- function(olmeNBBayes,getSample=FALSE)
+  {
+    ## If getSample=TRUE, then outputDPFit must be the output of getSample with mod=4/3
+    if (!getSample){
+      o <- olmeNBBayes$para
+    }else{
+      o <- olmeNBBayes
+      o$DP <- TRUE
+    }
+
+    UsedPara <- c(
+                  "$B$"=o$B,burnin=o$burnin,
+                  maxD=o$max_aG,
+                  "$\\mu_{\\beta}$"=paste("(",paste(sprintf("%1.2f",c(o$mu_beta[1],o$mu_beta[2])),collapse=","),"...)",sep="",collapse=""),
+                  "$\\Sigma_{\\beta}$"=paste("(",paste(sprintf("%1.2f",c(o$Sigma_beta[1,1],o$Sigma_beta[2,1])),collapse=","),
+                    "...)")
+                  )
+    
+      
+    if (o$DP){
+      UsedPara<-c(
+                  UsedPara,"M"=o$M,
+                  "$ib_D$"=sprintf("%1.2f",o$ib_D),"$a_D$"=sprintf("%1.2f",o$a_D),M=o$M
+                  )
+    }
+    
+    return (UsedPara)
+    
+  }
+
+
+
+
+plotbeta <- function(shape1,shape2,poi=FALSE,col="red",lwd=1,lty=2)
+  {
+    xs <- seq(0,1,0.001)
+    if (!poi)plot(xs,dbeta(xs,shape1,shape2),type="l",col=col,lwd=lwd,lty=lty)
+    else points(xs,dbeta(xs,shape1,shape2),type="l",col=col,lwd=lwd,lty=lty)
+  }
+plotlnorm <- function(mulog,sdlog,poi=FALSE,col="red")
+  {
+    xs <- seq(0,10,0.001)
+    if (!poi) plot(xs,dlnorm(xs,mulog,sdlog),type="l",col=col)
+    else points(xs,dlnorm(xs,mulog,sdlog),type="l",col=col)
+  }
+
+
+useSamp <- function(thin,burnin,B)
+  {
+    temp <- (1:B)*thin
+    unadj <- temp[burnin < temp & temp <= B]
+    start <- unadj[1] - burnin -1
+    return (unadj-start)
+  }
+
+dqmix <- function(weightH1,aGs,rGs,alphas=seq(0,0.99,0.01),dens=TRUE)
+  {
+    ## return a B by length(alphas) matrix, containing the quantile estimates at each corresponding alphas  
+    ## weightH1s: B by M matrix
+    ## aGs: B by M matrix
+    ## rGs: B by M matrix
+    B <- nrow(aGs)
+    M <- ncol(aGs)
+    if(nrow(weightH1) != B) stop()
+    if(ncol(weightH1) != M)stop()
+    if(nrow(rGs) != B) stop()
+    if(ncol(rGs) != M) stop()
+    pis <- c(t(weightH1))
+    aGs <- c(t(aGs))
+    rGs <- c(t(rGs))
+    
+    if (dens)
+      {
+        re <- .Call("mixdDist",
+                    as.numeric(pis),
+                    as.numeric(aGs),
+                    as.numeric(rGs),as.numeric(alphas),
+                    as.integer(B),as.integer(M),
+                    package ="lmeNBBayes")
+      }else{
+        re <- .Call("mixQDist",
+                    as.numeric(pis),
+                    as.numeric(aGs),
+                    as.numeric(rGs),as.numeric(alphas),
+                    as.integer(B),as.integer(M),
+                    package ="lmeNBBayes")
+      }
+    for (i in 1 : length(re)) re[[i]] <- matrix(re[[i]],nrow=B,ncol=length(alphas),byrow=TRUE)
+    return (re)
+  }
+
+######## subroutines for getS ##############
+
+## Functions to compute E(Yij) and Var(Yij) assuming regression coefficients are random
+momBeta <- function(aG,rG,mu.alpha=1.298,sigma.alpha=0.262)
+  {
+    ## Y | G, alpha ~ NB(size=exp(alpha),prob=G)
+    ## G ~ Beta(aG,rG)
+    ## alpha ~ N(mu.alpha,sigma.alpha)
+
+    ## E(Y) = E(E(E(Y|G,alpha))) = E(E( [1/G - 1]exp(alpha))) = [ E(1/G)-1 ]*E(exp(alpha))
+    ## E(1/G) = ...some calculations... = (aG+rG-1)/(aG-1)
+    ## exp(alpha) ~ logN(mu.alpha,sigma.alpha)
+
+    ## E(Y) = ( (aG+rG-1)/(aG-1)-1 )*exp(mu.alpha + sigma.alpha^2/2 )
+    E1G <- (aG+rG-1)/(aG-1)
+    EexpAlpha <- exp(mu.alpha + sigma.alpha^2/2 )
+    EY <- ( E1G -1 )*EexpAlpha
+
+    ## E(1/G^2) = (aG+rG-1)*(aG+rG-2)/((aG-1)*(aG-2))
+    E1G2 <- (aG+rG-1)*(aG+rG-2)/( (aG-1)*(aG-2))
+    ## Var( exp(alpha)) = (exp(sigma.alpha^2) - 1)*exp(2*mu.alpha + sigma.alpha^2)
+    VexpAlpha <- (exp(sigma.alpha^2) - 1)*exp(2*mu.alpha + sigma.alpha^2)
+    ## Var(Y) = Var_G( E(Y|G) ) +  E_G( Var(Y|G) )
+    ##        = Var_G ( E_alpha ( E(Y|G,alpha))) + E_G( Var_alpha(E(Y|G,alpha)) + E_G( E_alpha( Var(Y|G,alpha))  )
+    ##        = Var_G ( 1/G - 1)*E( exp(alpha) )^2 + E_G(Var_alpha( [1/G - 1]exp(alpha) )) + E_G( E_alpha( exp(alpha)*([1-G]/ G^2 )   ))
+    ##        = Var_G ( 1/G )*E( exp(alpha) )^2 + E_G([1/G - 1]^2)*Var_alpha( exp(alpha)) + E_G([1-G]/(G^2)) *E_alpha( exp(alpha) )
+    ##        = (E(1/G^2)-E(1/G)^2)*E( exp(alpha) )^2
+    ##        + [E(1/G^2) - 2*E(1/G) + 1 ]*Var( exp(alpha))
+    ##        + [E(1/G^2)-E(1/G)]*E( exp(alpha) )
+
+    VarY <- (E1G2-E1G^2)*((EexpAlpha)^2) +
+      (E1G2 - 2*E1G + 1)*VexpAlpha +
+        (E1G2 - E1G)*EexpAlpha
+
+    return(list(EY=EY,VarY=VarY,SEY=sqrt(VarY)))
+  }
+
+
+momGL <- function(EG=1.820,VG=0.303,mu.alpha=1.298,sigma.alpha=0.262)
+  {
+    ## Y|G,alpha ~ NB(size=exp(alpha),prob=1/(G+1))
+    ## G ~ dist(mean=EG,var=VG)
+    ## alpha ~ N(mu.alpha,sigma.alpha)
+
+    EG2 <- VG + EG^2
+    EexpAlpha <- exp(mu.alpha + sigma.alpha^2/2 )
+    VexpAlpha <- (exp(sigma.alpha^2) - 1)*exp(2*mu.alpha + sigma.alpha^2)
+    ## E(Y) = E(E(E(Y|G,alpha))) = E(E( G*exp(alpha))) = E(G)*E(exp(alpha))
+    EY <- EG*EexpAlpha
+    ## Var(Y) = Var_G( E(Y|G) ) +  E_G( Var(Y|G) )
+    ##        = Var_G ( E_alpha ( E(Y|G,alpha))) + E_G( Var_alpha(E(Y|G,alpha)) + E_G( E_alpha( Var(Y|G,alpha))  )
+    ##        = Var_G ( G*E( exp(alpha) ) ) + E_G( Var_alpha( G*exp(alpha) )) + E_G( E_alpha( exp(alpha)*G*(G+1)   ))
+    ##        = Var_G ( G )*E(exp(alpha))^2 + E_G(G^2)*Var( exp(alpha) ) + E_G( G*(G+1))*E( exp(alpha) )
+    ##        = Var(G)*E(exp(alpha))^2    + E(G^2)*Var( exp(alpha) ) + ( E(G^2) + E(G) )*E( exp(alpha) )
+    VarY <-     VG*(EexpAlpha^2) +    EG2*VexpAlpha + (EG2 + EG)*EexpAlpha
+  
+    return(list(EY=EY,VarY=VarY,SEY=sqrt(VarY)))
+  }
+
+##
+
+F_inv_beta2 <- function(ps,aG1,rG1,aG2,rG2,pi)
+  {
+    quant <- rep(NA,length(ps))
+    for (i in 1 : length(ps))
+      {
+        p <- ps[i]
+        G = function (t) pi*pbeta(t,shape1=aG1,shape2=rG1)+(1-pi)*pbeta(t,shape1=aG2,shape2=rG2) - p
+        quant[i] <- uniroot(G,c(0,1000))$root
+      }   
+    return(quant)
+  }
 
 
 index.b.each <- function(Y,ID,labelnp,X,betas,aGs,rGs,pis)
@@ -299,7 +1163,7 @@ index.b.each <- function(Y,ID,labelnp,X,betas,aGs,rGs,pis)
     ## observing Y_{i,new+} >= y_{i,new+} given observing Y_{i,pre+}=y_{i,pew+}
     uniID <- unique(ID)
     Npat <- length(uniID)
-    probs <- rep(NA,Npat);
+    probs <- rep(NA,Npat)
     for (ipat in 1 : Npat)
       {
         Yi <- Y[ID==uniID[ipat]]
@@ -308,7 +1172,7 @@ index.b.each <- function(Y,ID,labelnp,X,betas,aGs,rGs,pis)
         ## step 1: compute y_{i,pre+} and y_{i,new+} for all the patients:
         Ypresum <- sum(Yi[labelnpi==0])
         Ynewsum <- sum(Yi[labelnpi==1])
-        if (sum(labelnpi==0)==0 || sum(labelnpi==1)==0 )
+        if (sum(labelnpi==0)==0 | sum(labelnpi==1)==0 )
           {
             ## no new scans or no pre scans; no way to calculate the prob index!
             probs[ipat] <- NA
@@ -336,9 +1200,11 @@ index.b.each <- function(Y,ID,labelnp,X,betas,aGs,rGs,pis)
             for (ih in 1 : M )
               {
                 if (pis[ih] == 0) next
-                BoverB <- BoverB + pis[ih]*beta(rpresum+rnewsum+aGs[ih],k+Ypresum+rGs[ih])/beta(aGs[ih],rGs[ih])
+                BoverB <- BoverB + pis[ih]*exp(lbeta(rpresum+rnewsum+aGs[ih],k+Ypresum+rGs[ih])-lbeta(aGs[ih],rGs[ih]))
               }
-            num <- num + gamma(rnewsum+k)/(gamma(rnewsum)*gamma(k+1))*BoverB
+            
+            num <- num + choose(rnewsum+k-1,k)*BoverB
+            ##num <- num + gamma(rnewsum+k)/(gamma(rnewsum)*gamma(k+1))*BoverB
           }
         ## step 4: compute denominator 
         den <- 0
@@ -515,1323 +1381,223 @@ index.YZ <- function(Y,ID,labelnp,X,betas,
   }
 
 
-lmeNBBayes <- function(formula,          ##   A vector of length sum ni, containing responses
-                       data,
-                       ##   A sum ni by p matrix, containing covariate values. The frist column must be 1 (Intercept)
-                       ID,         ##   A Vector of length sum ni, indicating patients
-                       B = 105000, ##     A scalar, the number of Gibbs iteration 
-                       burnin = 5000,  
-                       printFreq = B,
-                       M = NULL,
-                       probIndex = FALSE,
-                       thin =1, ## optional
-                       labelnp=NULL, ## necessary if probIndex ==1
-                       epsilonM = 0.001,## nonpara
-                       para = list(mu_beta = NULL,Sigma_beta = NULL,a_D = 0.01, ib_D = 3,max_aG=30),
-                       DP=TRUE,
-                       seed=1,Reduce=1
-                       )
-  {
-    set.seed(seed)
-    
- 
-    X <- model.matrix(object=formula,data=data)
-    covariatesNames<- colnames(X)
-    Y <- model.response(model.frame(formula=formula,data=data))
-    ## If ID is a character vector of length sum ni,
-    ## it is modified to an integer vector, indicating the first appearing patient
-    ## as 1, the second one as 2, and so on..
-
-    ## This code generate samples from NBRE model with constant random effect ~ DP mixture of Beta
-    if (is.vector(X)) X <- matrix(X,ncol=1)
-    NtotAll <- length(Y)
-    if (nrow(X)!= NtotAll) stop ("nrow(X) ! = length(Y)")
-    if (length(ID)!= NtotAll)  stop ("length(ID)! = length(Y)")
-    if (!is.null(labelnp) & length(labelnp)!= NtotAll)  stop ("labelnp! = length(Y)")
-
-    
-    dims <- dim(X)
-    Ntot <- dims[1]
-    pCov <- dims[2]
-    ## cat("pCov",pCov)
-    if (is.null(para$mu_beta))
-      {
-        para$mu_beta <- rep(0,pCov)
-      }
-    mu_beta <- para$mu_beta
-
-    if (length(mu_beta)!=ncol(X))
-      stop("The dimension of the fixed effect hyperparameter is wrong!")
-    
-    if (is.null(M)) M  <- round(1 + log(epsilonM)/log(para$ib_D/(1+para$ib_D)))
-    if (is.null(para$Sigma_beta)) {
-      para$Sigma_beta <-  diag(5,pCov)
+rmvnorm <- 
+  function (n, mean = rep(0, nrow(sigma)), sigma = diag(length(mean)), 
+            method = c("eigen", "svd", "chol"), pre0.9_9994 = FALSE) 
+{
+  if (!isSymmetric(sigma, tol = sqrt(.Machine$double.eps), 
+                   check.attributes = FALSE)) {
+    stop("sigma must be a symmetric matrix")
+  }
+  if (length(mean) != nrow(sigma)) {
+    stop("mean and sigma have non-conforming size")
+  }
+  sigma1 <- sigma
+  dimnames(sigma1) <- NULL
+  if (!isTRUE(all.equal(sigma1, t(sigma1)))) {
+    warning("sigma is numerically not symmetric")
+  }
+  method <- match.arg(method)
+  if (method == "eigen") {
+    ev <- eigen(sigma, symmetric = TRUE)
+    if (!all(ev$values >= -sqrt(.Machine$double.eps) * abs(ev$values[1]))) {
+      warning("sigma is numerically not positive definite")
     }
-    
-    evalue_sigma_beta <- eigen(para$Sigma_beta, symmetric = TRUE, only.values = TRUE)$values
-    if (min(evalue_sigma_beta) <= 0) stop("Sigma_beta must be positive definite!")
-    Inv_sigma_beta <- c( solve(para$Sigma_beta) )
-
-    X <- c(X) ## {xij} = { x_{1,1},x_{2,1},..,x_{Ntot,1},x_{1,2},....,x_{Ntot,p} }
-
-    ## change the index of ID to numeric from 1 to # patients
-    temID <- ID  
-    N <- length(unique(temID))
-    uniID <- unique(temID)
-    ID <- rep(NA,length(temID))
-    for (i in 1 : length(uniID))
-      {
-        ID[temID == uniID[i]] <- i
-      }
-    
-    mID <- ID-1
-    ## the labelnp of patients only with 1 (new scans) labels are replaced by all 0 (old scans)
-    
-    maxni <- max(tapply(rep(1,length(ID)),ID,sum))
-    Npat <- length(unique(ID))
-    
-    if (probIndex)
-      {
-        ## the labelnp of patients only with 1 (new scans) labels are replaced by all 0 (old scans)
-        patwonew <- which(as.numeric(tapply((labelnp==0),ID,sum)==0)==1)
-        for (i in 1 : length(patwonew)) labelnp[ID == patwonew[i]] <- 0
-        
-        patwoNorO <-  which(as.numeric(tapply((labelnp==1),ID,sum)==0)==1)
-        if (length(patwoNorO)==0) patwoNorO <- -1000;
-      }else{
-        
-        labelnp <- rep(0,length(Y))
-      }
-      
-
-    if (B %% thin != 0 )
-      stop("B %% thin !=0")
-    if (burnin %% thin !=0)
-      stop("burnin %% thin !=0")
-
-    if (DP)
-      {
-        if (Reduce){
-        re <- .Call("ReduceGibbs",
-                    as.numeric(Y),           ## REAL
-                    as.numeric(X),           ## REAL
-                    as.integer(mID),         ## INTEGER
-                    as.integer(B),           ## INTEGER
-                    as.integer(maxni),       ## INTEGER
-                    as.integer(Npat),        ## INTEGER
-                    as.numeric(labelnp),     ## REAL
-                    as.numeric(para$max_aG),
-                    as.numeric(para$mu_beta),     ## REAL
-                    as.numeric(evalue_sigma_beta),  ## REAL
-                    as.numeric(Inv_sigma_beta),  ## REAL
-                    as.numeric(para$a_D),
-                    as.numeric(para$ib_D),
-                    as.integer(M),
-                    as.integer(burnin),      ## INTEGER
-                    as.integer(printFreq),
-                    as.integer(probIndex),
-                    as.integer(thin),
-                    package = "lmeNBBayes"
-                    )
-
-        for ( i in 13 : 14 ) re[[i]] <- matrix(re[[i]],B,Npat,byrow=TRUE)
-        names(re) <- c("aGs","rGs","vs","weightH1",
-                       "condProb","h1s","g1s",
-                       "beta",
-                       "D","logL",
-                       "AR","prp","aGs_pat","rGs_pat")
-      }else{
-        re <- .Call("gibbs",
-                    as.numeric(Y),           ## REAL
-                    as.numeric(X),           ## REAL
-                    as.integer(mID),         ## INTEGER
-                    as.integer(B),           ## INTEGER
-                    as.integer(maxni),       ## INTEGER
-                    as.integer(Npat),        ## INTEGER
-                    as.numeric(labelnp),     ## REAL
-                    as.numeric(para$max_aG),
-                    as.numeric(para$mu_beta),     ## REAL
-                    as.numeric(evalue_sigma_beta),  ## REAL
-                    as.numeric(Inv_sigma_beta),  ## REAL
-                    as.numeric(para$a_D),
-                    as.numeric(para$ib_D),
-                    as.integer(M),
-                    as.integer(burnin),      ## INTEGER
-                    as.integer(printFreq),
-                    as.integer(probIndex),
-                    as.integer(thin),
-                    package = "lmeNBBayes"
-                    )
-        names(re) <- c("aGs","rGs","vs","weightH1",
-                       "condProb","h1s","g1s",
-                       "beta",
-                       "D","logL",
-                       "AR","prp")
-      }
-        ## http://stackoverflow.com/questions/8720550/how-to-return-array-of-structs-from-call-to-c-shared-library-in-r
-        ## for ( i in 1:4 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
-        for ( i in 1 : 4 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
-        re[[5]]  <- matrix(re[[5]],(B-burnin)/thin,Npat,byrow=TRUE)
-        for ( i in 6 : 7 ) re[[i]] <- matrix(re[[i]],B,Npat,byrow=TRUE)
-        re[[8]] <- matrix(re[[8]],B,pCov,byrow=TRUE)
- 
-        if (probIndex)
-          {
-            ## patients with no new scans
-            if (sum(patwoNorO < 0) > 1) patwoNorO <- NULL
-            re$condProb[,patwoNorO] <- NA
-          }
-        re$para$max_aG <- para$max_aG
-        re$para$a_D <- para$a_D
-        re$para$ib_D <- para$ib_D
-        re$para$M <- M
-        names(re$AR) <-c("aG", "rG","beta","D")
-      }else{
-        if (Reduce){
-          re <- .Call("Beta1reduce",
-                      as.numeric(Y),           ## REAL
-                      as.numeric(X),           ## REAL
-                      as.integer(mID),         ## INTEGER
-                      as.integer(B),           ## INTEGER
-                      as.integer(maxni),       ## INTEGER
-                      as.integer(Npat),        ## INTEGER
-                      as.numeric(labelnp),     ## REAL
-                      as.numeric(para$max_aG),
-                      as.numeric(para$mu_beta),     ## REAL
-                      as.numeric(evalue_sigma_beta),  ## REAL
-                      as.numeric(Inv_sigma_beta),  ## REAL
-                      as.integer(burnin),      ## INTEGER
-                      as.integer(printFreq),
-                      as.integer(probIndex),
-                      as.integer(thin),
-                      package = "lmeNBBayes"
-                    )
-
-        }else{
-        re <- .Call("Beta1",
-                    as.numeric(Y),           ## REAL
-                    as.numeric(X),           ## REAL
-                    as.integer(mID),         ## INTEGER
-                    as.integer(B),           ## INTEGER
-                    as.integer(maxni),       ## INTEGER
-                    as.integer(Npat),        ## INTEGER
-                    as.numeric(labelnp),     ## REAL
-                    as.numeric(para$max_aG),
-                    as.numeric(para$mu_beta),     ## REAL
-                    as.numeric(evalue_sigma_beta),  ## REAL
-                    as.numeric(Inv_sigma_beta),  ## REAL
-                    as.integer(burnin),      ## INTEGER
-                    as.integer(printFreq),
-                    as.integer(probIndex),
-                    as.integer(thin),
-                    package = "lmeNBBayes"
-                    )
-      }
-        ## http://stackoverflow.com/questions/8720550/how-to-return-array-of-structs-from-call-to-c-shared-library-in-r
-        ## for ( i in 1:4 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
-        re[[3]] <- matrix(re[[3]],B,Npat,byrow=TRUE)
-        re[[4]] <- matrix(re[[4]],B,pCov,byrow=TRUE)
-        re[[7]]  <- matrix(re[[7]],(B-burnin)/thin,Npat,byrow=TRUE)
-        names(re) <- c("aG","rG",
-                       "g1s",
-                       "beta",
-                       "AR","prp",
-                       "condProb",
-                       "logL"
-                       )
-        if (probIndex)
-          {
-            ## patients with no new scans
-            if (sum(patwoNorO < 0) > 1) patwoNorO <- NULL
-            re$condProb[,patwoNorO] <- NA
-          }
-        re$para$max_aG <- para$max_aG
-        names(re$AR) <-c("aG", "rG","beta")
-        
-      }
- 
-
-    if (probIndex)
-      {
-        re$para$labelnp <- labelnp
-        re$para$CEL <- Y
-        re$para$ID <- ID
-
-        re$condProbSummary <- condProbCI(ID,re$condProb)
-      }
-    re$para$Sigma_beta <- para$Sigma_beta
-    re$para$mu_beta <- para$mu_beta
-    names(re$para$mu_beta) <- rownames(re$para$Sigma_beta) <-
-      colnames(re$para$Sigma_beta) <- colnames(re$beta) <- covariatesNames
-    re$para$B <- B
-    re$para$burnin <- burnin
-    re$para$thin <- thin
-    re$para$probIndex <- probIndex
-    re$para$Reduce <- Reduce
-    re$para$burnin <- burnin
-    re$para$DP <- DP
-    re$para$formula <- formula
-    class(re) <- "LinearMixedEffectNBBayes"
-    return (re)
+    retval <- ev$vectors %*% diag(sqrt(ev$values), length(ev$values)) %*% 
+      t(ev$vectors)
   }
-
-
-
-print.LinearMixedEffectNBBayes <- function(x,...){
-
-    para <- x$para
-    if (is.vector(x$beta)) pCov <- 1 else pCov <- ncol(x$beta)
-    cat("\n -----Negative binomial mixed effect regression----- ")
-    if (para$DP){
-      cat("\n ---random effect is from DP mixture of beta distributions---")
-    }else{
-      cat("\n ---random effect is from a single beta distribution---")
+  else if (method == "svd") {
+    sigsvd <- svd(sigma)
+    if (!all(sigsvd$d >= -sqrt(.Machine$double.eps) * abs(sigsvd$d[1]))) {
+      warning("sigma is numerically not positive definite")
     }
-
-    cat("\n====INPUT==== ")
-
-    cat("\n formula: ");print(para$formula)
-    if (is.null(para$thin))
-      para$thin <- 1
-    cat(paste(" MCMC parameters: B=",para$B,", burnin=",para$burnin,", thin=",para$thin,sep=""))
-    if (para$Reduce)
-      {
-        cat("\n The target distribution in McMC is a partially marginalized posterior distribution")
-        cat("\n (random effects are integrated out).")
-      }
-    cat("\n ------------------")
-    cat("\n [[Hyperparameters]] ")
-    cat("\n [Fixed Effect]       ")
-    cat("\n beta ~ multivariate normal with mean and covariance matrix:\n  ")
-    muSigma <- data.frame(para$mu_beta,"   |   ",para$Sigma_beta);
-    colnames(muSigma) <- c("mean","   |   ","covariance",rep(" ",pCov-1))
-    rownames(muSigma) <- names(para$mu_beta)
-    print(muSigma)
-    
-    cat(paste(" [Random effect dist'n] aG,rG ~ Unif(min=",0.5,", max=",para$max_aG,")",sep=""))
-    if (para$DP){
-      cat(paste("\n [Precision parameter]      D ~ Unif(min=",para$a_D,", max=",para$ib_D,")",sep=""))
-      cat(paste("\n [Truncation parameter]     M = ",para$M,sep=""))
-    }
-
-    
-    if (!is.null(para$thin))
-      {
-        useSample <- useSamp(B=para$B,thin=para$thin,burnin=para$burnin)
-        useSampleAll <- FALSE
-      }
- 
-    cat("\n====OUTPUT====")
-
-    cat("\n [Fixed effect]")
-    if (para$DP){
-       cat(" and [Precision parameter] \n")
-       bb <- cbind(x$beta[useSample,],x$D[useSample])
-       row.names =  c( names(para$mu_beta),"D")
-    }else{
-      cat("\n")
-      bb <- cbind(x$beta[useSample,])
-       row.names = names(para$mu_beta)
-    }
-    bsummary <- data.frame(colMeans(bb),apply(bb,2,sd),t(apply(bb,2,quantile,prob=c(0.025,0.975))),
-                           row.names =  row.names)
-    colnames(bsummary) <- c("Estimate","Std. Error","lower CI","upper CI")
-    print(round(bsummary,4))
-    cat("-----------------")
-    cat("\n Reported estimates are posterior means computed after discarding burn-in")
-    if (para$thin==1){
-      cat(". No Thinning.")
-    }else{
-      cat(paste(" and thinning at every ",para$thin," samples.",sep=""))
-    }
-    cat("\n Posterior mean of the logLikelihood",mean(x$logL[useSample]))
-    cat("\n Acceptance Rate in Metropolice Hasting rates")
-    cat("\n ",paste(names(x$AR),round(x$AR,4),sep=":"))
-
-    if (para$probIndex)
-      {
-        cat("\n-----------------\n")
-        cat("\n ===== Conditional probability index ======\n")
-        prIndex(x)
-      }
+    retval <- t(sigsvd$v %*% (t(sigsvd$u) * sqrt(sigsvd$d)))
   }
-
-
-
-
- print.IndexBatch <- prIndex <- function(x,...)
-  {
-    condProb <- x$condProbSummary
-    ID <- x$para$ID
-    uniID <- unique(ID)
-    CEL <- x$para$CEL
-    labelnp <- x$para$labelnp
-    ## condProb:: A length(uniID) by 3 matrix, first column: a point estimate,
-    ## the second column lower CI, the third column upper CI
-    ## index of patient, reorder the patients in the increasing ways of probability index1 
-    Suborderps <- order(condProb[,1])
-    ## ps[order(ps)[1]] == min(ps)
-    ## contains the index (1,2,...,Npat) of pat in decreasing way of index1
-    orderps <- uniID[Suborderps]
-    ## contains the ID (integer but the increment is not always 1) of pat in increasing way
-    r <- NULL
-    patwoNO <- patwNew0 <- rep(NA,length(uniID))
-    ## m1G_1 must be > 0
-    ## \hat{ E(1/G) } - 1
-    ii <- rep(NA,length(uniID))
-    for (i in 1 : length(uniID) )
-      {
-        i.orderp <- orderps[i]
-        pickedIndex <- ID==i.orderp
-        ## vector of length ID, containing TRUE if the position agree with the observations of ID orderps[i]
-        pickedpt <- which(uniID==i.orderp)
-        ## single element indicating the position of the orderps[i] in uniID
-        CELpat <- CEL[pickedIndex]
-        labelnppat <- labelnp[pickedIndex]
-        CELpat0 <- CELpat[labelnppat==0]
-        CELpat1 <- CELpat[labelnppat==1]
-        if (length(CELpat0)==0) CELpat0 <- "--"
-        if (length(CELpat1)==0)
-          {
-            CELpat1 <- "--"
-            patwNew0[i] <- FALSE
-          }else
-        patwNew0[i] <- sum(CELpat1)>0 ## TRUE if patients have sum of CEL counts on new scan greater than zero
-        ## Patients with no new/old scans are omitted at the end
-        patwoNO[i] <- !is.na(condProb[pickedpt,1]) ## TRUE if patients have a new scan and old scan  
-        r <- rbind(r,
-                   c(
-                     "pre-Scan"=paste(CELpat0,collapse="/"),
-                     "new-Scan"=paste(CELpat1,collapse="/")
-                     )
-                   )
-        ## ======== printable format =========;
-        ii[i] <- paste(sprintf("%1.3f",condProb[pickedpt,1]),
-                         " (",sprintf("%1.3f",condProb[pickedpt,3]),
-                         ",",sprintf("%1.3f",condProb[pickedpt,4]),")",sep="")
-      }
-    
-    outp <- cbind(ii,r)
-    colnames(outp) <- c("conditional probability","pre-scan","new-scan")
-    rownames(outp) <- orderps
-
-    cat("\n Estimated conditional probability index and its 95 % CI.")
-    if (!is.null(x$para$qsum))
-      cat("\n The scalar function to summarize new scans:",x$para$qsum)
-    cat("\n-----------------\n")
-    print(data.frame(outp[patwoNO&patwNew0,]))
-    cat("\n-----------------")
-    cat("\n Patients are ordered by decreasing conditional probability.")
-    cat("\n Patients with no pre-scans or no new scans are not reported.")
-    cat("\n Patients whose new scans are all zero are not reported as conditional probability of such patients are always zero.")
+  else if (method == "chol") {
+    retval <- chol(sigma, pivot = TRUE)
+    o <- order(attr(retval, "pivot"))
+    retval <- retval[, o]
   }
-    
-
-
-
-
-
-nbinDPREchange <- function(Y,          ##   A vector of length sum ni, containing responses 
-                           X,          ##   A sum ni by p matrix, containing covariate values. The frist column must be 1 (Intercept)
-                           ID,         ##   A Vector of length sum ni, indicating patients
-                           B = 105000, ##     A scalar, the number of Gibbs iteration 
-                           burnin = 5000,  
-                           printFreq = B,
-                           M = NULL,
-                           labelnp, ## necessary if probIndex ==1
-                           epsilonM = 0.01,## nonpara
-                           para = list(mu_beta = NULL,Sigma_beta = NULL,a_D = 0.01, ib_D = 5,max_aG=30)
-                           )
-  {
-
-    ## This code generate samples from NBRE model with constant random effect ~ DP mixture of Beta
-    if (is.vector(X)) X <- matrix(X,ncol=1)
-    NtotAll <- length(Y)
-    if (nrow(X)!= NtotAll) stop("nrow(X) ! = length(Y)")
-    if (length(ID)!= NtotAll)  stop("length(ID)! = length(Y)")
-    if (length(labelnp)!= NtotAll)  stop ("labelnp! = length(Y)")
-
-    
-    dims <- dim(X)
-    Ntot <- dims[1]
-    pCov <- dims[2]
-    ## cat("pCov",pCov)
-    if (is.null(para$mu_beta))
-      {
-        para$mu_beta <- rep(0,pCov)
-      }
-    mu_beta <- para$mu_beta
-
-    if (is.null(M)) M  <- round(1 + log(epsilonM)/log(para$ib_D/(1+para$ib_D)))
-    if (is.null(para$Sigma_beta)) {
-      para$Sigma_beta <-  diag(5,pCov)
-    }
-    Sigma_beta = para$Sigma_beta
-    
-    evalue_sigma_beta <- eigen(Sigma_beta, symmetric = TRUE, only.values = TRUE)$values
-    if (min(evalue_sigma_beta) <= 0) stop("Sigma_beta must be positive definite!")
-    Inv_sigma_beta <- c( solve(Sigma_beta) )
-
-    X <- c(X) ## {xij} = { x_{1,1},x_{2,1},..,x_{Ntot,1},x_{1,2},....,x_{Ntot,p} }
-
-    ## change the index of ID to numeric from 1 to # patients
-    temID <- ID  
-    N <- length(unique(temID))
-    uniID <- unique(temID)
-    ID <- rep(NA,length(temID))
-    for (i in 1 : length(uniID))
-      {
-        ID[temID == uniID[i]] <- i
-      }
-    
-    mID <- ID-1
-    ## the labelnp of patients only with 1 (new scans) labels are replaced by all 0 (old scans)
-    
-    maxni <- max(tapply(rep(1,length(ID)),ID,sum))
-    Npat <- length(unique(ID))
-
-
-    ## the labelnp of patients only with 1 (new scans) labels are replaced by all 0 (old scans)
-    patwonew <- which(as.numeric(tapply((labelnp==0),ID,sum)==0)==1)
-    for (i in 1 : length(patwonew)) labelnp[ID == patwonew[i]] <- 0
-
-    re <- .Call("gibbsREchange",
-                as.numeric(Y),           ## REAL
-                as.numeric(X),           ## REAL
-                as.integer(mID),         ## INTEGER
-                as.integer(B),           ## INTEGER
-                as.integer(maxni),       ## INTEGER
-                as.integer(Npat),        ## INTEGER
-                as.numeric(labelnp),     ## REAL
-                as.numeric(para$max_aG),
-                as.numeric(para$mu_beta),     ## REAL
-                as.numeric(evalue_sigma_beta),  ## REAL
-                as.numeric(Inv_sigma_beta),  ## REAL
-                as.numeric(para$a_D),
-                as.numeric(para$ib_D),
-                as.integer(M),
-                as.integer(burnin),      ## INTEGER
-                as.integer(printFreq),
-                package = "lmeNBBayes"
-                )
-
-
-    ## http://stackoverflow.com/questions/8720550/how-to-return-array-of-structs-from-call-to-c-shared-library-in-r
-    ## for ( i in 1:4 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
-    for ( i in 1 : 4 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
-    for ( i in 5 : 8 ) re[[i]] <- matrix(re[[i]],B,Npat,byrow=TRUE)
-    re[[9]] <- matrix(re[[9]],B,pCov,byrow=TRUE)
-    names(re) <- c("aGs","rGs","vs","weightH1",
-                   "h1s","h2s","g1s","g2s",
-                   "beta",
-                   "logL","D",
-                   "AR","prp")
-
-    re$para <- para
-    re$para$M <- M
-    names(re$AR) <-names(re$prp) <- c("aG", "rG","beta","D")
-    
-    
-    return (re)
-  }
-
-
-DPfit <- function(Y,          ##   A vector of length sum ni, containing responses 
-                  X,          ##   A sum ni by p matrix, containing covariate values. The frist column must be 1 (Intercept)
-                  ID,         ##   A Vector of length sum ni, indicating patients
-                  B = 105000, ##     A scalar, the number of Gibbs iteration 
-                  burnin = 5000,  
-                  printFreq = B,
-                  model = "nonpara-unif",
-                  M = NULL,
-                  epsilonM = 0.01,## nonpara
-                  prob=0.9,        ## nonpara
-                  labelnp=NULL,
-                  para = list(mu_beta = NULL,Sigma_beta = NULL,a_D = 1, r_D = 1, a_qG = 1, r_qG = 1,
-                    mu_aG = 0,sd_aG = 2, mu_rG = 0,sd_rG = 2, Nclust=NULL),
-                  initBeta=NULL
-                  )
-  {
-
-    Ntot <- length(Y)
-
-
-    ## === prior input check =====## 
-    if (is.vector(X)) X <- matrix(X,ncol=1)
-    
-
-
-    if (nrow(X)!= Ntot) stop ("nrow(X) ! = length(Y)")
-    if (length(ID)!= Ntot)  stop ("length(ID)! = length(Y)")
-    
-    if (is.null(para$a_qG)){
-      para$a_qG <- 1
-      cat("\n a_qG needs to be specified!! set to 1")
-    }
-    a_qG = para$a_qG
-    
-    if (is.null(para$r_qG) ) {
-      para$r_qG <- 1
-      cat("\n r_qG needs to be specified!! set to 1")
-    }
-    r_qG = para$r_qG
-
-    if (is.vector(X)) X <- matrix(X,ncol=1)
-    pCov <- ncol(X)
-
-    if (is.null(para$mu_beta))
-      {
-        para$mu_beta <- rep(0,pCov)
-      }
-    
-    mu_beta = para$mu_beta
-    
-    if (is.null(para$Sigma_beta)) {
-      para$Sigma_beta <-  diag(5,pCov)
-    }
-    Sigma_beta = para$Sigma_beta
-
-    if (is.null(labelnp)) labelnp <- rep(0,length(Y))
-    
-    
-    
-
-    KK <- para$Nclust
-    if (!is.null(KK)){
-      if (!is.null(para$a_D)) stop("Both KK and a_D are selected! must be one of them...")
-      ## the total number of patients observed by irev^th review
-      NtotID <- length(unique(ID))
-      ## the number of patients whose new scans are observed at the irev^th review
-      NnewID <- length(unique(ID[labelnp==1]))
-      ## parameters
-      para$a_D <- uniroot(f=K_NisK,interval=c(0.003,50),
-                          rD=para$r_D,N=(NtotID+NnewID)*2,K=KK)$root
-      
-    }
-    a_D <- para$a_D
-    
-    if (is.null(M)) M  <- round(1 + log(0.01)/log(5/(1+5)))
-
-    ## change the index of ID to numeric from 1 to # patients
-    temID <- ID  
-    N <- length(unique(temID))
-    uniID <- unique(temID)
-    ID <- rep(NA,length(temID))
-    for (i in 1 : length(uniID))
-      {
-        ID[temID == uniID[i]] <- i
-      }
-    
-    p <- pCov
-    if( is.vector(X)) p <- 1 
-    X <- c(X) ## {xij} = { x_{1,1},x_{2,1},..,x_{Ntot,1},x_{1,2},....,x_{Ntot,p} }
-    mID <- ID-1
-
-    ## The patients with labelnp = 1 (no old scans) for all repeated measures
-    ## are treated as lack of new scans and used to estimate beta only.
-    ## skip the computation of H2
-    ## All patients have old scans
-    
-    ## the labelnp of patients only with 1 (new scans) labels are replaced by all 0 (old scans)
-    patwonew <- which(as.numeric(tapply((labelnp==0),ID,sum)==0)==1)
-    for (i in 1 : length(patwonew)) labelnp[ID == patwonew[i]] <- 0
-    
-    patwoNS <-  which(as.numeric(tapply((labelnp==1),ID,sum)==0)==1)
-    if (length(patwoNS)==0) patwoNS <- -999;
-    patwoNS <- patwoNS - 1
-    
-    maxni <- max(tapply(rep(1,length(ID)),ID,sum))
-    Npat <- length(unique(ID))
-
-    
-    evalue_sigma_beta <- eigen(Sigma_beta, symmetric = TRUE, only.values = TRUE)$values
-    if (min(evalue_sigma_beta) <= 0) stop("Sigma_beta must be positive definite!")
-    Inv_sigma_beta <- c( solve(Sigma_beta) )
-    
-    if (model=="para-constantRE"| model==1)
-      {
-        
-        
-        if (is.null(para$mu_aG )){
-          para$mu_aG <- 0.5
-          cat("\n mu_aG needs to be specified!! set to 0.5")
-        }
-        mu_aG = para$mu_aG
-        
-        if (is.null(para$mu_rG)){
-          para$mu_rG <- 0.5
-          cat("\n mu_rG needs to be specified!! set to 0.5")
-        }
-        mu_rG = para$mu_rG
-        
-        if (is.null(para$sd_aG) ){
-          para$sd_aG <- 2
-          cat("\n mu_rG needs to be specified!! set to 2")
-        }
-        sd_aG = para$sd_aG
-        
-        if (is.null(para$sd_rG)) {
-          para$sd_rG <- 2
-          cat("\n mu_rG needs to be specified!! set to 2")
-        }
-        sd_rG = para$sd_rG
-        
-        ##parametric model: gi is constant over time 
-        labelnp <- rep(0,length(Y))    
-        re <- .Call("Beta1",
-                    as.numeric(Y),           ## REAL
-                    as.numeric(X),           ## REAL
-                    as.integer(mID),         ## INTEGER
-                    as.integer(B),           ## INTEGER
-                    as.integer(maxni),       ## INTEGER
-                    as.integer(Npat),        ## INTEGER
-                    as.numeric(labelnp),     ## REAL
-                    as.numeric(mu_aG),
-                    as.numeric(sd_aG),
-                    as.numeric(mu_rG),
-                    as.numeric(sd_rG),
-                    as.numeric(mu_beta),     ## REAL
-                    as.numeric(evalue_sigma_beta),  ## REAL
-                    as.numeric(Inv_sigma_beta),  ## REAL
-                    as.integer(burnin),      ## INTEGER
-                    as.integer(printFreq),
-                    package = "lmeNBBayes"
-                    )
-        
-        re[[3]] <- matrix(re[[3]],B,N,byrow=TRUE)
-        re[[4]] <- matrix(re[[4]],B,p,byrow=TRUE)
-        names(re) <- c("aG","rG","gPre","beta","AR","prp")
-        para <- list(mu_beta = mu_beta,
-                     Sigma_beta = Sigma_beta,
-                     B=B,
-                     model="para-constantRE",
-                     burnin = burnin,
-                     mu_aG = mu_aG,
-                     sd_aG = sd_aG,
-                     mu_rG = mu_rG,
-                     sd_rG = sd_rG
-                     )
-        re$para <- para
-        names(re$AR) <-c("aG", "rG", "beta")
-        return(re)
-        
-      }else if (model=="para"){
-        ## // Y_ij | Gij = gij ~ NB(size=exp(X_{ij}^T beta),prob=gij)
-        ## // gij = g1 if j is in pre-scan 
-        ## //     = g_new if j is in old-scan 
-        ## // g_new = Ji * g1 + (1-Ji) * g2 
-        ## // Ji ~ ber(qG)
-        ## // qG ~ beta(a_qG,r_qG)
-        ## // g1, g2 ~ beta(aG,rG)
-        ## // beta ~ rnorm(mu_beta,sigma_beta)
-        ## // aG, rG ~ lognorm(mu_aG,sd_aG),lognorm(mu_rG,sd_rG)
-        
-        
-        if (is.null(para$mu_aG )){
-          para$mu_aG <- 0.5
-          cat("\n mu_aG needs to be specified!! set to 0.5")
-        }
-        mu_aG = para$mu_aG
-        
-        if (is.null(para$mu_rG)){
-          para$mu_rG <- 0.5
-          cat("\n mu_rG needs to be specified!! set to 0.5")
-        }
-        mu_rG = para$mu_rG
-        
-        if (is.null(para$sd_aG) ){
-          para$sd_aG <- 2
-          cat("\n mu_rG needs to be specified!! set to 2")
-        }
-        sd_aG = para$sd_aG
-        
-        if (is.null(para$sd_rG) ) {
-          para$sd_rG <- 2
-          cat("\n mu_rG needs to be specified!! set to 2")
-        }
-        sd_rG = para$sd_rG
-        
-        re <- .Call("Beta14",
-                    as.numeric(Y),           ## REAL
-                    as.numeric(X),           ## REAL
-                    as.integer(mID),         ## INTEGER
-                    as.integer(B),           ## INTEGER
-                    as.integer(maxni),       ## INTEGER
-                    as.integer(Npat),        ## INTEGER
-                    as.numeric(labelnp),     ## REAL
-                    as.numeric(a_qG),
-                    as.numeric(r_qG),
-                    as.numeric(mu_aG),
-                    as.numeric(sd_aG),
-                    as.numeric(mu_rG),
-                    as.numeric(sd_rG),
-                    as.numeric(mu_beta),     ## REAL
-                    as.numeric(evalue_sigma_beta),  ## REAL
-                    as.numeric(Inv_sigma_beta),  ## REAL
-                    as.integer(burnin),      ## INTEGER
-                    as.integer(printFreq),
-                    as.integer(patwoNS),
-                    package = "lmeNBBayes"
-                    )
-        ## http://stackoverflow.com/questions/8720550/how-to-return-array-of-structs-from-call-to-c-shared-library-in-r
-        ## for ( i in 1:4 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
-        for ( i in 4 : 7 ) re[[i]] <- matrix(re[[i]],B,N,byrow=TRUE)
-        re[[8]] <- matrix(re[[8]],B,p,byrow=TRUE)
-        names(re) <- c("aG","rG","qG",
-                       "gPre","g2s","gNew","js",
-                       "beta","AR","prp")
-        para <- list(mu_beta = mu_beta,
-                     Sigma_beta = Sigma_beta,
-                     B=B,
-                     model="para",
-                     burnin = burnin,
-                     mu_aG = mu_aG,
-                     sd_aG = sd_aG,
-                     mu_rG = mu_rG,
-                     sd_rG = sd_rG,
-                     a_qG=a_qG,
-                     r_qG=r_qG
-                     )
-        re$para <- para
-        names(re$AR) <-c("aG", "rG", "beta")
-        return(re)
-        
-        
-      }else if (model=="para-unif"){
-        if (is.null(para$max_aG) )  para$max_aG <- 30
-        max_aG <- para$max_aG
-        ## // Y_ij | Gij = gij ~ NB(size=exp(X_{ij}^T beta),prob=gij)
-        ## // gij = g1 if j is in pre-scan 
-        ## //     = g_new if j is in old-scan 
-        ## // g_new = Ji * g1 + (1-Ji) * g2 
-        ## // Ji ~ ber(qG)
-        ## // qG ~ beta(a_qG,r_qG)
-        ## // g1, g2 ~ beta(aG,rG)
-        ## // beta ~ rnorm(mu_beta,sigma_beta)
-        ## // aG, rG ~ unif(0,max_aG)
-
-        re <- .Call("Beta14Unif",
-                    as.numeric(Y),           ## REAL
-                    as.numeric(X),           ## REAL
-                    as.integer(mID),         ## INTEGER
-                    as.integer(B),           ## INTEGER
-                    as.integer(maxni),       ## INTEGER
-                    as.integer(Npat),        ## INTEGER
-                    as.numeric(labelnp),     ## REAL
-                    as.numeric(a_qG),
-                    as.numeric(r_qG),
-                    as.numeric(max_aG),
-                    ## as.numeric(mu_aG),
-                    ## as.numeric(sd_aG),
-                    ## as.numeric(mu_rG),
-                    ## as.numeric(sd_rG),
-                    as.numeric(mu_beta),     ## REAL
-                    as.numeric(evalue_sigma_beta),  ## REAL
-                    as.numeric(Inv_sigma_beta),  ## REAL
-                    as.integer(burnin),      ## INTEGER
-                    as.integer(printFreq),
-                    as.integer(patwoNS),
-                    package = "lmeNBBayes"
-                    )
-        ## http://stackoverflow.com/questions/8720550/how-to-return-array-of-structs-from-call-to-c-shared-library-in-r
-        ## for ( i in 1:4 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
-        for ( i in 5 : 8 ) re[[i]] <- matrix(re[[i]],B,N,byrow=TRUE)
-        re[[9]] <- matrix(re[[9]],B,p,byrow=TRUE)
-        names(re) <- c("aG","rG","qG","logL",
-                       "gPre","g2s","gNew","js",
-                       "beta","AR","prp")
-        para <- list(mu_beta = mu_beta,
-                     Sigma_beta = Sigma_beta,
-                     B=B,
-                     model="para",
-                     burnin = burnin,
-                     max_aG = max_aG,
-                     ## mu_aG = mu_aG,
-                     ## sd_aG = sd_aG,
-                     ## mu_rG = mu_rG,
-                     ## sd_rG = sd_rG,
-                     a_qG=a_qG,
-                     r_qG=r_qG
-                     )
-        re$para <- para
-        names(re$AR) <-c("aG", "rG", "beta")
-        return(re)
-      }else if (model== "nonpara" | model==8){
-
-        ## nonparametric model
-        ## // Y_ij | Gij = gij ~ NB(size=exp(X_{ij}^T beta),prob=gij)
-        ## // gij = g1 if j is in pre-scan 
-        ## //     = g_new if j is in old-scan 
-        ## // g_new = Ji * g1 + (1-Ji) * g2 
-        ## // Ji ~ ber(qG)
-        ## // qG ~ beta(a_qG,r_qG)
-        ## // g1, g2 ~ sum_{h=1}^M pi_h beta(aG_h,rG_h)
-        ## // beta ~ mvrnorm(mu_beta,sigma_beta)
-        ## // aG ~lognorm(mu_aG,sd_aG)
-        ## // rG ~ lognorm(mu_rG,sd_rG)
-        ##  nonparametric model,
-        
-        
-        if (is.null(para$mu_aG )){
-          para$mu_aG <- 0.5
-          cat("\n mu_aG needs to be specified!! set to 0.5")
-        }
-        mu_aG = para$mu_aG
-        
-        if (is.null(para$mu_rG)){
-          para$mu_rG <- 0.5
-          cat("\n mu_rG needs to be specified!! set to 0.5")
-        }
-        mu_rG = para$mu_rG
-        
-        if (is.null(para$sd_aG) ){
-          para$sd_aG <- 2
-          cat("\n mu_rG needs to be specified!! set to 2")
-        }
-        sd_aG = para$sd_aG
-        
-        if (is.null(para$sd_rG) ) {
-          para$sd_rG <- 2
-          cat("\n mu_rG needs to be specified!! set to 2")
-        }
-        sd_rG = para$sd_rG
-        if (is.null(para$r_D) ){
-          cat("\n r_D needs to be specified!! set to 1")
-          para$r_D <- 1
-        }
-        r_D = para$r_D
-        re <- .Call("Beta24",
-                    as.numeric(Y),           ## REAL
-                    as.numeric(X),           ## REAL
-                    as.integer(mID),         ## INTEGER
-                    as.integer(B),           ## INTEGER
-                    as.integer(maxni),       ## INTEGER
-                    as.integer(Npat),        ## INTEGER
-                    as.integer(M),           ## INTEGER
-                    as.numeric(labelnp),     ## REAL
-                    as.numeric(a_qG),        ## REAL
-                    as.numeric(r_qG),        ## REAL
-                    as.numeric(mu_aG),       ## REAL
-                    as.numeric(sd_aG),       ## REAL
-                    as.numeric(mu_rG),       ## REAL
-                    as.numeric(sd_rG),       ## REAL
-                    as.numeric(mu_beta),     ## REAL
-                    as.numeric(evalue_sigma_beta),  ## REAL
-                    as.numeric(Inv_sigma_beta),  ## REAL
-                    as.numeric(a_D),         ## REAL
-                    as.numeric(r_D),         ## REAL
-                    as.integer(burnin),      ## INTEGER
-                    as.integer(printFreq),
-                    as.integer(patwoNS),
-                    package = "lmeNBBayes"
-                    )
-        for ( i in 3 : 8 ) re[[i]] <- matrix(re[[i]],B,N,byrow=TRUE)
-        for ( i in 9 : 12 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
-        re[[13]] <- matrix(re[[13]],B,p,byrow=TRUE)
-        names(re) <- c("qG","D",
-                       "gPre","g2s","gNew","js","h1s","h2s",
-                       "weightH1","vs","aGs","rGs",
-                       "beta","AR","prp")
-        re$para <- list(
-                        burnin = burnin,
-                        M=M,
-                        B=B,
-                        model=model,
-                        Npat=N,
-                        Ntot=length(Y),
-                        para
-                        )
-        names(re$AR) <- names(re$prp) <- c(paste("aG",1:M,sep=""),
-                                           paste("rG",1:M,sep=""),
-                                           paste("beta",sep="")
-                                           )
-        re$h1s <- re$h1s + 1
-        re$h2s <- re$h2s + 1
-        re$MeanWH <- colMeans(re$weightH1);
-        names(re$MeanWH) <- paste("cluster",1:M)
-        return(re)
-        
-      }else if (model=="nonpara-unif"){
-        
-        ## nonparametric model D: is fixed
-        ## // Y_ij | Gij = gij ~ NB(size=exp(X_{ij}^T beta),prob=gij)
-        ## // gij = g1 if j is in pre-scan 
-        ## //     = g_new if j is in old-scan 
-        ## // g_new = Ji * g1 + (1-Ji) * g2 
-        ## // Ji ~ ber(qG)
-        ## // qG ~ beta(a_qG,r_qG)
-        ## // g1, g2 ~ sum_{h=1}^M pi_h beta(aG_h,rG_h)
-        ## // beta ~ mvrnorm(mu_beta,sigma_beta)
-        ## // aG,rG ~ unif(0.0001,max_aG)
-        ##  nonparametric model,
-        if (is.null(para$max_aG) )  para$max_aG <- 30
-        max_aG <- para$max_aG
-
-        if (is.null(para$max_D))  para$max_D <- 5
-        maxD <- para$max_D 
-
-        if (is.null(initBeta)) initBeta <- rep(0, pCov)
-        if (is.null(M)) M  <- 10 ## Need to fix this 
-        
-        re <- .Call("Beta24Unif",
-                    as.numeric(Y),           ## REAL
-                    as.numeric(X),           ## REAL
-                    as.integer(mID),         ## INTEGER
-                    as.integer(B),           ## INTEGER
-                    as.integer(maxni),       ## INTEGER
-                    as.integer(Npat),        ## INTEGER
-                    as.integer(M),           ## INTEGER
-                    as.numeric(labelnp),     ## REAL
-                    as.numeric(a_qG),        ## REAL
-                    as.numeric(r_qG),        ## REAL
-                    as.numeric(max_aG),
-                    ## as.numeric(mu_aG),    ## REAL
-                    ## as.numeric(sd_aG),    ## REAL
-                    ## as.numeric(mu_rG),    ## REAL
-                    ## as.numeric(sd_rG),    ## REAL
-                    as.numeric(mu_beta),     ## REAL
-                    as.numeric(evalue_sigma_beta),  ## REAL
-                    as.numeric(Inv_sigma_beta),  ## REAL
-                    as.numeric(maxD),         ## REAL
-                    ## as.numeric(r_D),         ## REAL
-                    as.integer(burnin),      ## INTEGER
-                    as.integer(printFreq),
-                    as.integer(patwoNS),
-                    as.numeric(initBeta),
-                    package = "lmeNBBayes"
-                    )
-        for ( i in 4 : 9 ) re[[i]] <- matrix(re[[i]],B,N,byrow=TRUE)
-        for ( i in 10 : 13 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
-        re[[14]] <- matrix(re[[14]],B,p,byrow=TRUE)
-        names(re) <- c("qG","D","logL",
-                       "gPre","g2s","gNew","js","h1s","h2s",
-                       "weightH1","vs","aGs","rGs",
-                       "beta","AR","prp")
-        
-        para$mu_aG <- para$mu_rG <- para$sd_aG <- para$sd_rG <- para$a_D <- para$r_D <- NULL
-        
-        re$para <- list(
-                        burnin = burnin,
-                        M=M,
-                        B=B,
-                        model=model,
-                        Npat=N,
-                        Ntot=length(Y),
-                        a_qG=a_qG,
-                        r_qG=r_qG,
-                        max_aG=max_aG,
-                        mu_beta=mu_beta,
-                        Sigma_beta=Sigma_beta,
-                        maxD=maxD
-                        )
-        names(re$AR) <- names(re$prp) <- c(paste("aG",1:M,sep=""),
-                                           paste("rG",1:M,sep=""),
-                                           paste("beta",sep=""),
-                                           "D"
-                                           )
-        re$h1s <- re$h1s + 1
-        re$h2s <- re$h2s + 1
-        re$MeanWH <- colMeans(re$weightH1);
-        names(re$MeanWH) <- paste("cluster",1:M)
-        return(re)
-
-      }
-  }
-
-
-
-UsedPara <- function(olmeNBBayes,getSample=FALSE)
-  {
-    ## If getSample=TRUE, then outputDPFit must be the output of getSample with mod=4/3
-    if (!getSample){
-      o <- olmeNBBayes$para
-    }else{
-      o <- olmeNBBayes
-      o$DP <- TRUE
-    }
-
-    UsedPara <- c(
-                  "$B$"=o$B,burnin=o$burnin,
-                  maxD=o$max_aG,
-                  "$\\mu_{\\beta}$"=paste("(",paste(sprintf("%1.2f",c(o$mu_beta[1],o$mu_beta[2])),collapse=","),"...)",sep="",collapse=""),
-                  "$\\Sigma_{\\beta}$"=paste("(",paste(sprintf("%1.2f",c(o$Sigma_beta[1,1],o$Sigma_beta[2,1])),collapse=","),
-                    "...)")
-                  )
-    
-      
-    if (o$DP){
-      UsedPara<-c(
-                  UsedPara,"M"=o$M,
-                  "$ib_D$"=sprintf("%1.2f",o$ib_D),"$a_D$"=sprintf("%1.2f",o$a_D),M=o$M
-                  )
-    }
-    
-    return (UsedPara)
-    
-  }
-
-
-
-
-plotbeta <- function(shape1,shape2,poi=FALSE,col="red",lwd=1,lty=2)
-  {
-    xs <- seq(0,1,0.001)
-    if (!poi)plot(xs,dbeta(xs,shape1,shape2),type="l",col=col,lwd=lwd,lty=lty)
-    else points(xs,dbeta(xs,shape1,shape2),type="l",col=col,lwd=lwd,lty=lty)
-  }
-plotlnorm <- function(mulog,sdlog,poi=FALSE,col="red")
-  {
-    xs <- seq(0,10,0.001)
-    if (!poi) plot(xs,dlnorm(xs,mulog,sdlog),type="l",col=col)
-    else points(xs,dlnorm(xs,mulog,sdlog),type="l",col=col)
-  }
-
-
-useSamp <- function(thin,burnin,B)
-  {
-    temp <- (1:B)*thin
-    unadj <- temp[burnin < temp & temp <= B]
-    start <- unadj[1] - burnin -1
-    return (unadj-start)
-  }
-
-dqmix <- function(weightH1,aGs,rGs,alphas=seq(0,1,0.01),dens=TRUE)
-  {
-    ## return a B by length(alphas) matrix, containing the quantile estimates at each corresponding alphas  
-    ## weightH1s: B by M matrix
-    ## aGs: B by M matrix
-    ## rGs: B by M matrix
-    B <- nrow(aGs)
-    M <- ncol(aGs)
-    pis <- c(t(weightH1))
-    aGs <- c(t(aGs))
-    rGs <- c(t(rGs))
-    if (dens)
-      {
-        re <- .Call("mixdDist",
-                    as.numeric(pis),
-                    as.numeric(aGs),
-                    as.numeric(rGs),as.numeric(alphas),
-                    as.integer(B),as.integer(M),
-                    package ="lmeNBBayes")
-      }else{
-        re <- .Call("mixQDist",
-                    as.numeric(pis),
-                    as.numeric(aGs),
-                    as.numeric(rGs),as.numeric(alphas),
-                    as.integer(B),as.integer(M),
-                    package ="lmeNBBayes")
-      }
-    for (i in 1 : length(re)) re[[i]] <- matrix(re[[i]],nrow=B,ncol=length(alphas),byrow=TRUE)
-    return (re)
-  }
-
-
-momentsBeta <- function(aG1,rG1,beta)
-  {
-    ## Y ~ NB(size=rij,prob=G)
-    ## G ~ Beta(aG1,rG1)
-    ## E(1/G) = ...some calculations... = (aG+rG-1)/(aG-1)
-    ## E(Y)=exp(beta0)*(mu_{1/G}+1)=exp(1)*((aG1+rG1-1)/(aG1-1)+1)
-    ## Var(1/G) = E(1/G^2) - E(1/G)^2 = (aG1+rG1-1)/(aG1-1)*( (aG1+rG1-2)/(aG1-2) - (aG1+rG1-1)/(aG1-1) ) = 0.06559506
-    ## Var(Y) = rij*Var(1/G)*(rij+1) + rij*E(1/G)*(E(1/G)-1)
-    ## calculate E(Y), Var(Y), E(1/G), and E(1/G^2) at initial time
-    rij <- exp(beta) ## value of size parmeter at time zero
-    E1G <- (aG1+rG1-1)/(aG1-1)
-    V1G <- (aG1+rG1-1)/(aG1-1)*( (aG1+rG1-2)/(aG1-2) - (aG1+rG1-1)/(aG1-1) )
-    EY <- rij*(E1G-1)
-    VY <- rij*V1G*(rij+1)+rij*E1G*(E1G-1)
-    return (c(EY=EY,SDY=sqrt(VY),
-              E1G=E1G,V1G=V1G))
-  }
-
-
-momentsGL <- function(EG,VG,beta)
-  {
-    ## Y ~ NB(size=rij,prob=1/(G+1))
-    ## G ~ dist(mean=EG,var=VG)
-    rij <- exp(beta)
-    ## E(Y|G) = rij*G
-    ## Var(Y|G) = rij*G*(G+1)
-    ## E(Y)=E(E(Y|G))=rij*E(G)
-    EY <- rij*EG
-    ## Var(Y) = Var(E(Y|G)) + E(Var(Y|G))
-    ##        = Var(rij*G) + E(G*(G+1)*rij)
-    ##        = rij^2*Var(G) + rij*(E(G^2)+E(G))
-    ##        = rij^2*Var(G) + rij*(Var(G)+E(G)^2+E(G))
-    VY <- rij^2*VG + rij*(VG+EG^2+EG)
-    return (c(EY=EY,SDY=sqrt(VY),
-              EG=EG,VG=VG))
-  }
-
-
-DevRatio <- function(gPre,gNew) ## gPre, gNew must be a matrix of length(useSample) by N
-  {
-    ## The deviation of CEL counts of single patient i from overall cohort at week j could be measured by:
-    ## R_ij=E(Y_ij|G_ij)/E(Y_ij)= r_ij (1-g_ij)/gij * 1/(rij*(mu_{1/G}-1)) = (1-g_ij)/(gij*(mu_{1/G}-1))
-    ## The change in the deviation R_ij at two time point could be measured by
-    ## R_ij/R_ij' = (1-g_ij)/(gij*(mu_{1/G}-1))*(gij'*(mu_{1/G}-1))/(1-g_ij) = g_ij'*(1-g_ij)/(g_ij*(1-g_ij'))
-    ## Hence the deviation ratio between the pre scan period and new scan period is:
-    ## R_inew/R_ipre
-    ## How much patient i increases the deviation from the overall trend between the pre-scan period and new-scan period
-
-    ## the elemnt-wise operations
-    m1G_1 <- mean(c(1/gPre,1/gNew)) - 1
-    
-    EYGpre <- 1/gPre - 1
-    EYGnew <- 1/gNew - 1
-
-
-    CI95_EYGpre <- apply(EYGpre,2,quantile,prob=c(0.5,0.025,0.975)) / m1G_1
-    CI95_EYGnew <- apply(EYGnew,2,quantile,prob=c(0.5,0.025,0.975)) / m1G_1
-
-    CI95_EYGpre[1,] <- colMeans(EYGpre)
-    CI95_EYGnew[1,] <- colMeans(EYGnew)
-    
-    ##DevMat <- EYGnew/EYGpre ## B-Bburn by N
-    ##CI95 <- apply(DevMat,2,quantile,prob=c(0.5,0.025,0.975))
-
-    NewPre <-  CI95_EYGnew[1,]/CI95_EYGpre[1,]
-    
-    ##CI95[1,] <- colMeans(DevMat)
-    
-    ##rownames(CI95)[1] <- "mean"
-    rownames(CI95_EYGpre)[1] <- "mean"
-    rownames(CI95_EYGnew)[1] <- "mean"
-    if (!is.null(rownames(gPre)))
-      {
-        names(CI95) <- colnames(gPre)
-        colnames(CI95_EYGpre) <- colnames(gPre)
-        colnames(CI95_EYGnew) <- colnames(gPre)
-      }
-    re <- list(Ratio=NewPre,
-               Rpre=CI95_EYGpre,
-               Rnew=CI95_EYGnew)
-    
-    return (re)
-  }
-
-paralnorm <- function(E,V=15^2){
-  ## E: expectation of log-normally distributed r.v.
-  ## V: variance of log-normally distributed r.v
-
-  sd <- sqrt(log(V/E+1))
-  mu <- log(E)-sd/2
-  return(list(mu=mu,sd=sd))
+  retval <- matrix(rnorm(n * ncol(sigma)), nrow = n, byrow = !pre0.9_9994) %*% 
+    retval
+  retval <- sweep(retval, 2, mean, "+")
+  colnames(retval) <- names(mean)
+  retval
 }
-F_inv_gam <- function(p,sp1,sc1,sp2,sc2,pi)
+
+
+aggBeta <- function(bets,piTRT)
   {
-    G = function (t)
-      pi*pgamma(t,shape=sp1,scale=sc1)+(1-pi)*pgamma(t,shape=sp2,scale=sc2) - p
-                return(uniroot(G,c(0,100))$root)
+    if (is.vector(bets)) bets <- matrix(bets,nrow=1)
+    log(exp(bets[,1])*(1-piTRT)+exp(bets[,2])*piTRT)
   }
 
-getSampleS <- function(iseed=1,propTreat=2/3,RedFactor=0.5,detail=FALSE)
-  {
-    ## The subset of patients in treatment arm experience the treatment effect
-    ## Those with treatment effect decrease the expectation of CEL counts by RedFactor at every time point.
-    ## RedFactor is constant over time.
 
-    ## propTreat is the proportion of the patients in treatment arm with treatment effect
-    
-    ## if full = TRUE then full dataset is returned and rev is ignored
-    ni <- 8
-    Npat <- 120;
-    i.trt <- c(
-               rep(1,round(Npat*propTreat*0.5)), ## 0.5 because half of the patients receive treatments
-               rep(0,Npat-round(Npat*propTreat*0.5))
-               )
-    pi <- 0.3
-    
-    beta0 <- 1.5
-    beta1 <- -0.05
-    
-    aG1 <- 10
-    rG1 <- 10
-    aG2 <- 20
-    rG2 <- 1
-
-    ## generate the initial random effect values of everyone
-    hs <- sample(1:2,Npat,c(pi,1-pi),replace=TRUE)
-    Npat_dist1 <- sum(hs==1)
-    Npat_dist2 <- sum(hs==2)
-    
-    gsBASE <- rep(NA,Npat)
-    gsBASE[hs==1] <- rbeta(Npat_dist1,aG1,rG1);
-    gsBASE[hs==2] <- rbeta(Npat_dist2,aG2,rG2);
-
-    ## generate samples for dist = "b","b3", "g", and "l" (except "b2")
-    Y <- NULL
-    timecov <- c(0,0,(1:(ni-2)))
-    for ( ipat in 1 : Npat)
-      {
-        ## the number of repeated measures are the same
-        ## we assume that the treatment effects occurs once after the screening and baseline
-        got <- rnbinom(ni,size = exp(beta0+beta1*timecov)*RedFactor^(i.trt[ipat]*(timecov>0)), prob = gsBASE[ipat])         
-        Y <- c(Y,got)
-      }
-    ## cat("beta0",beta0,"\n")
-    d <- data.frame(Y=Y,
-                    X1=rep(1,Npat*ni),
-                    X2=rep(timecov,Npat),
-                    labelnp=rep(c(rep(0,2),rep(1,ni-2)),Npat), ## the first two scans are pre-scans 
-                    ID=rep(1:Npat,each=ni),
-                    gsBASE = rep(gsBASE,each=ni),
-                    Treat = rep(1:0,each=(Npat/2)*ni), ## the first half of the patients receive treatment
-                    effectTreat = rep(i.trt,each=ni),
-                    hs = rep(hs,each=ni)
-                    )
-
-    if (detail)
-      {
-        E1G.1 <- momentsBeta(aG1,rG1,beta0)[3] ## E1G
-        E1G.2 <- momentsBeta(aG2,rG2,beta0)[3]
-        
-        E1G <- E1G.1*pi+E1G.2*(1-pi)
-
-        E1s<-c(E1G,E1G.1,E1G.2)
-        names(E1s) <- c("Overall","H=1","H=2")
-        for (i in 1 : length(E1s))
-          {
-            noTreatEffect <- (E1s[i]-1)*exp(beta0+beta1*timecov)*RedFactor^(0*(timecov>0))
-            TreatEffect <- (E1s[i]-1)*exp(beta0+beta1*timecov)*RedFactor^(1*(timecov>0))
-            
-            rr <- rbind(noTreatEffect,TreatEffect)
-            colnames(rr) <- timecov
-            cat("\n The expected CEL counts E(Yt)",names(E1s)[i],"\n")
-            print(rr)
-          }
-      }
-    
-    return(d)
-  }
-
-getSample <- function(
-                      iseed = 911,
-                      rev = 4,
-                      dist = "b",
-                      mod = 0,
-                      probs = seq(0,0.99,0.01),
-                      ts = seq(0.001,0.99,0.001),
-                      full = FALSE
-                      )
+getS <- function(iseed = "random",
+                 rev = 4,
+                 dist = "b",
+                 mod = 0,
+                 probs = seq(0,0.99,0.01),
+                 ts = seq(0.001,0.99,0.001),
+                 full = FALSE,
+                 trtAss = FALSE,
+                 trueCPI = FALSE,
+                 IFN=FALSE)
   {
     ## mod = 0: generate sample
-    ## mod = 1: quantiles of the true populations
+    ## mod = 1: quantiles of the true populations at given probs
     ## mod = 2: densities of the true populations
     ## mod = 3: parameters of the simulation model
     ## mod = 4: parameters for uninformative prior
-
-    ## dist = "b","b2","g" 
-
+    ## mod = 5: parameters for informative prior under the placebo assumption
+    ## mod = 6: parameters for informative prior under the random sample assumption
+    ## dist = "b","b2","YZ" 
+    ## trtASS == FALSE then piTRT = 0 else piTRT = 0.674
+    if (trtAss) piTRT <- 0.6736842 else piTRT <- 0
     ## if full = TRUE then full dataset is returned and rev is ignored
-    ni <- 11
+    ## if trueCPI == TRUE then returns the most precise conditional probability computed based on the
+    ## treatment assignment 
     Npat <- 180; ## upto review 4, Npat=160 in total this number must be divisible by NpatEnterPerMonth
+
+    if (iseed=="random") set.seed(sample(1e+6,1)) else  set.seed(iseed)
+
+    ## The prior for regression coefficients beta
+    if (IFN){
+      ## prior only based on IFN datasets
+      mu.beta <- c( 1.3863398,  0.0283592,  -1.0780041,  -0.1943629, -1.4005187)
+      Sigma.beta <- matrix(round(c( 0.07080114,  -0.03561139,   0.05512568,     -0.03559668,    0.08999295,
+                                   -0.03561139,   0.03365417,  -0.04243730,      0.02763631,   -0.05092112,
+                                    0.05512568,  -0.04243730,   0.06099776,     -0.02992216,    0.08058643,
+                                   -0.03559668,   0.02763631,  -0.02992216,      0.04543372,   -0.03128294,
+                                    0.08999295,  -0.05092112,   0.08058643,     -0.03128294,    0.13064430),4),
+                                 byrow=TRUE,5,5)
+    }else{
+      mu.beta <- c(1.29761146,  0.02762343,  -0.71042449,    -0.16054429,   -0.92415434)
+      Sigma.beta <- matrix(round(c( 0.06839318,   -0.0230865954,    -0.037123180,     -0.02048146,   -0.0697404833,
+                                   -0.02308660,    0.0173408469,    -0.000580806,      0.01097764,    0.0005858456,
+                                   -0.03712318,   -0.0005808060,     0.284828736,      0.02000585,    0.4364152673,
+                                   -0.02048146,    0.0109776373,     0.020005847,      0.02616263,    0.0312899440,
+                                   -0.06974048,    0.0005858456,     0.436415267,      0.03128994,    0.6989128826),4),
+                           byrow=TRUE,5,5)
+    }
+    if (mod == 3){
+      ## return parameter information of selected model
+      outputMod3 <- list(mu.beta=mu.beta, Sigma.beta = Sigma.beta)
+      mu.alpha <- mu.beta[1]
+      sigma.alpha <- Sigma.beta[1,1]
+    }
+    
+    if (dist == "b"){
+      aG1 <- 3  
+      rG1 <- 0.8 ##0.8
+      if (mod %in% c(0,4:6)){
+        gs <- rbeta(Npat,aG1,rG1)
+        hs <- rep(1,Npat)
+      }else if (mod==1){
+        ## mod = 1: quantiles of the true populations at given probs
+        return(cbind(probs=probs,
+                     quantile=qbeta(probs,shape1=aG1,shape2=rG1)))
+      }else if (mod==2){
+        ## mod = 2: densities of the true populations
+        return (cbind(ts=ts,
+                      dens=dbeta(ts,shape1=aG1,shape2=rG1)) )
+      }else if (mod == 3){
+        ## mod = 3: parameters of the simulation model
+        c1 <- momBeta(aG1,rG1,mu.alpha=mu.alpha,sigma.alpha=sigma.alpha)
+        outputMod3 <- c(outputMod3,list(K=1,c1=c1,aGs=c(aG1=aG1), rGs=c(rG1=rG1)))
+      }
+
+    }else if (dist == "b2"){
+      ## mixture of two beta distributions
+      ## cluster 1: E(Y)=exp(beta0)*mu_G=exp(2)*((aG1+rG1-1)/(aG1-1)+1)=3.098636 ## at initial time
+      ## cluster 2: E(Y)=exp(beta0)*mu_G=exp(2)*((aG2+rG2-1)/(aG2-1)+1)=7.037196 ## at initial time
+      pi <- 0.3
+      
+      aG1 <- 10
+      rG1 <- 10
+      aG2 <- 20
+      rG2 <- 1
+      ## generate the initial random effect values of everyone
+      if (mod %in% c(0,4:6)){
+        hs <- sample(1:2,Npat,c(pi,1-pi),replace=TRUE)
+        Npat_dist1 <- sum(hs==1)
+        Npat_dist2 <- sum(hs==2)
+        
+        gs <- rep(NA,Npat)
+        gs[hs==1] <- rbeta(Npat_dist1,aG1,rG1);
+        gs[hs==2] <- rbeta(Npat_dist2,aG2,rG2);
+      }else if (mod==1){
+        return (cbind(probs=probs,
+                      quantile=F_inv_beta2(ps=probs,aG1,rG1,aG2,rG2,pi=pi)))
+      }else if (mod==2){
+        return (cbind(ts=ts,
+                      dens=(pi*dbeta(ts,shape1=aG1,shape2=rG1)+(1-pi)*dbeta(ts,shape1=aG2,shape2=rG2))))
+      }else if (mod == 3){
+
+        c1 <- momBeta(aG1,rG1,mu.alpha=mu.alpha,sigma.alpha=sigma.alpha)
+        c2 <- momBeta(aG2,rG2,mu.alpha=mu.alpha,sigma.alpha=sigma.alpha)
+        outputMod3 <- c(outputMod3,list(
+                                        K=2,c1=c1,c2=c2,
+                                        aGs=c(aG1=aG1,aG2=aG2),
+                                        rGs=c(rG1=rG1,rG2=rG2),
+                                        pi=pi))
+      }
+    }else if ( dist == "YZ"){
+      
+      pi <- 0.85
+
+      alpha <- exp(-0.5)
+      ## a bimodal distribution with 85 % of Gi from a gamma distribution with mean 0.647 and variance 2.374
+      scale <- 2.374/0.647*alpha 
+      shape <- 0.647^2/2.374
+      mu <- 3*alpha
+      sd <- sqrt(0.25)*alpha
+      
+      ## generate the initial random effect values of everyone
+      if (mod %in% c(0,4:6) ){
+        hs <- sample(1:2,Npat,c(pi,1-pi),replace=TRUE)
+        Npat_dist1 <- sum(hs==1)
+        Npat_dist2 <- sum(hs==2)
+        
+        gs <- rep(NA,Npat)
+        gs[hs==1] <- rgamma(Npat_dist1,shape=shape,scale=scale);
+        gs[hs==2] <- rnorm(Npat_dist2,mean=mu,sd=sd);
+        gs[gs < 0 ] <- 0
+        gs <- 1/(1+gs)
+        
+      }else if (mod==1){
+        return (NULL)
+      }else if (mod == 2){
+        ts.trans <-1/ts-1
+        return (cbind(ts=ts,
+                      (pi*dgamma(ts.trans,shape=shape,scale=scale)+(1-pi)*dnorm(ts.trans,mean=mu,sd=sd) )*(1/ts^2)))
+        
+      }else if (mod == 3){
+        c1 <- momGL(EG=shape*scale,VG=shape*(scale^2),mu.alpha=mu.alpha,sigma.alpha=sigma.alpha) ## expectation and variance of Y
+        c2 <- momGL(EG=mu,VG=sd^2,mu.alpha=mu.alpha,sigma.alpha=sigma.alpha)
+        outputMod3 <- outputMod3 <- c(outputMod3,list(c1=c1,c2=c2,scale=scale,shape=shape,mu=mu,sd=sd,pi=pi,K=2))
+      }
+    }
+    ## return parameter information of selected model
+    if (mod == 3) return (outputMod3)
+    
+    ## Generate regression coefficients of this dataset
+    betasFull <- matrix(rmvnorm(n=1,mean=mu.beta,sigma=Sigma.beta),ncol=1)
+    
+    ## if (mod == 0) print(paste(c("Intercept",
+    ##       "timeInt1.plcb","timeInt1.trt",
+    ##       "timeInt2.plcb","timeInt2.trt"),
+    ##       sprintf("%1.4f",betasFull),collapse=":",sep=""))
+    ## Generate the treatment assignments 0 = placebo 1= trt
+    trtAss.pat <- sample(0:1,Npat,c(1-piTRT,piTRT),replace=TRUE)
+
+    ##print(trtAss.pat)
+    ##print(piTRT)
+    ## Sequential samples
+    ni <- 11
     NpatEnterPerMonth <- 15
     DSMBVisitInterval <- 4 ## months
     
-    varInfoP <- c(0.1312,0.0148)
-    ib_D <- 3
     ## === necessary for mod= 0, 3 and mod = 4
     ## d contains a full dataset
     days <- NULL
@@ -1840,617 +1606,166 @@ getSample <- function(
         ScandaysForSingleGroup <- ipatGroup:(ipatGroup+ni-1)
         days <- c(days,rep(ScandaysForSingleGroup,NpatEnterPerMonth))
       }
-
-    set.seed(iseed)
-    if (dist=="g") ## need to went through by all mod=0,...,4
-      {
-        ## r.e. mixture of two gamma distributions
-        pi <- 0.7
-        sp1 <- 0.3; sc1 <- 0.5
-        sp2 <- 4; sc2 <- 0.8
-        beta0 <- 0.5
-        beta1 <- 0
-        hs <- sample(1:2,Npat,c(pi,1-pi),replace=TRUE)
-        Npat_dist1 <- sum(hs==1)
-        Npat_dist2 <- sum(hs==2)
-
-        gsBASE <- rep(NA,Npat)
-        gsBASE[hs==1] <- rgamma(Npat_dist1,shape=sp1,scale=sc1)
-        gsBASE[hs==2] <- rgamma(Npat_dist2,shape=sp2,scale=sc2)
-        gsBASE <- 1/(1+gsBASE)
-        
-        if (mod==1)
-          {
-            lq <- length(probs);
-            quan <- rep(NA,lq);
-            for (i in 1 : lq) quan[i] <- F_inv_gam(p=probs[i],sp1=sp1,sc1=sc1,sp2=sp2,sc2=sc2,pi=pi)
-            quan = sort(1/(1+quan))
-            
-            return (rbind(probs=probs,quantile=quan))
-
-          }else if (mod == 2){
-            
-            ts.trans <-1/ts-1
-            return ((pi*dgamma(ts.trans,shape=sp1,scale=sc1)+(1-pi)*dgamma(ts.trans,shape=sp2,scale=sc2) )*(1/ts^2))
-            
-          }else if (mod == 3){
-            
-            c1 <- momentsGL(EG=sp1*sc1,VG=sp1*sc1^2,beta=beta0) ## expectation and variance of Y
-            c2 <- momentsGL(EG=sp2*sc2,VG=sp2*sc2^2,beta=beta0)
-            
-            outputMod3 <- list(infoPara = list(mu_beta=c(beta0,beta1),
-                                 Sigma_beta=diag(varInfoP),a_qG=100,r_qG=1),
-                               beta0=beta0,beta1=beta1,K=2,
-                               scales=c(sc1=sc1,sc2=sc2),
-                               shapes=c(sp1=sp1,sp2=sp2),
-                               c1=c1,c2=c2
-                               )
-          }
-      }else if (dist == "b"){
-       
-        beta0 <- 1
-        beta1 <- -0.05
-        aG1 <- 3
-        rG1 <- 0.8
-        
-        gsBASE <- rbeta(Npat,aG1,rG1)
-        hs <- rep(1,Npat)
-        if (mod==1){
-          return( 
-                 rbind(probs=probs,
-                       quantile=qbeta(probs,shape1=aG1,shape2=rG1)
-                       )
-                 )
-        }else if (mod==2){
-          
-          return (dbeta(ts,shape1=aG1,shape2=rG1))
-          
-        }else if (mod == 3){
-          
-          c1 <- momentsBeta(aG1,rG1,beta0)
-          outputMod3 <- list(infoPara = list(mu_beta=c(beta0,beta1),
-                               Sigma_beta=diag(varInfoP),
-                               a_D=0.01,ib_D=ib_D,max_aG=30
-                               ),##a_qG=10,r_qG=1),
-                             beta0=beta0,beta1=beta1,K=1,c1=c1, aGs=c(aG1=aG1),
-                             rGs=c(rG1=rG1))
-        }
-
-      }else if (dist == "b2")
-        {
-        ## mixture of two beta distributions
-        ## cluster 1: E(Y)=exp(beta0)*mu_G=exp(2)*((aG1+rG1-1)/(aG1-1)+1)=3.098636 ## at initial time
-        ## cluster 2: E(Y)=exp(beta0)*mu_G=exp(2)*((aG2+rG2-1)/(aG2-1)+1)=7.037196 ## at initial time
-        pi <- 0.3
-        
-        beta0 <- 1.5
-        beta1 <- -0.05
-        
-        aG1 <- 10
-        rG1 <- 10
-        aG2 <- 20
-        rG2 <- 1
-
-        ## generate the initial random effect values of everyone
-        hs <- sample(1:2,Npat,c(pi,1-pi),replace=TRUE)
-        Npat_dist1 <- sum(hs==1)
-        Npat_dist2 <- sum(hs==2)
-        
-        gsBASE <- rep(NA,Npat)
-        gsBASE[hs==1] <- rbeta(Npat_dist1,aG1,rG1);
-        gsBASE[hs==2] <- rbeta(Npat_dist2,aG2,rG2);
-        if (mod==1){
-          F_inv_beta2 <- function(p,aG1,rG1,aG2,rG2,pi)
-            {
-              G = function (t) pi*pbeta(t,shape1=aG1,shape2=rG1)+(1-pi)*pbeta(t,shape1=aG2,shape2=rG2) - p
-              return(uniroot(G,c(0,1000))$root)
-            }
-          lq <- length(probs);
-          quant <- rep(NA,lq);
-          for (i in 1 : lq) quant[i] <- F_inv_beta2(p=probs[i],aG1,rG1,aG2,rG2,pi=pi)
-          return (rbind(probs=probs,quantile=quant))
-        }
-        else if (mod==2){
-
-          return ((pi*dbeta(ts,shape1=aG1,shape2=rG1)+(1-pi)*dbeta(ts,shape1=aG2,shape2=rG2)) )
-        }else if (mod == 3){
-
-          c1 <- momentsBeta(aG1,rG1,beta0)
-          c2 <- momentsBeta(aG2,rG2,beta0)
-          outputMod3 <-  list(infoPara = list(mu_beta=c(beta0,beta1),
-                                Sigma_beta=diag(varInfoP),a_D=0.01,ib_D=ib_D,max_aG=30),
-                              beta0=beta0,beta1=beta1,K=2,c1=c1,c2=c2,
-                              aGs=c(aG1=aG1,aG2=aG2),
-                              rGs=c(rG1=rG1,rG2=rG2),
-                              pi=pi
-                              )
-        }
-      }
-    if ( dist == "YZ")
-      {
-        pi <- 0.85
-
-        alpha <- exp(-0.5)
-        ## logalpha <- -0.5
-        beta0 <- 0.905 ##0.405+0.5 beta - logalpha
-        beta1 <- 0
-        ## a bimodal distribution with 85 % of Gi from a gamma distribution with mean 0.647 and variance 2.374
-        scale <- 2.374/0.647*alpha 
-        shape <- 0.647^2/2.374
-        mu <- 3*alpha
-        sd <- sqrt(0.25)*alpha
-       
-        ## generate the initial random effect values of everyone
-        hs <- sample(1:2,Npat,c(pi,1-pi),replace=TRUE)
-        Npat_dist1 <- sum(hs==1)
-        Npat_dist2 <- sum(hs==2)
-        
-        gsBASE <- rep(NA,Npat)
-        gsBASE[hs==1] <- rgamma(Npat_dist1,shape=shape,scale=scale);
-        gsBASE[hs==2] <- rnorm(Npat_dist2,mean=mu,sd=sd);
-        gsBASE[gsBASE < 0 ] <- 0
-        gsBASE <- 1/(1+gsBASE)
-        
-        if (mod==1)
-          {
-            return (NULL)
-
-          }else if (mod == 2){
-            
-            ts.trans <-1/ts-1
-            return ((pi*dgamma(ts.trans,shape=shape,scale=scale)+(1-pi)*dnorm(ts.trans,mean=mu,sd=sd) )*(1/ts^2))
-            
-          }else if (mod == 3){
-           
-            outputMod3 <- list(infoPara = list(mu_beta=c(beta0,beta1),
-                                 Sigma_beta=diag(varInfoP),a_D=0.01,ib_D=ib_D,max_aG=30),
-                               beta0=beta0,beta1=beta1,scale=scale,shape=shape,mu=mu,sd=sd,pi=pi,K=2
-                               )
-          }
-      }
-      
-    ## generate samples for dist = "b","b3", "g", and "l" (except "b2")
-    Y <- NULL
-    timecov <- c(0,0,(1:(ni-2)))
+    Y <- XforFit <- XforTCPI <- NULL
+    ## timeInt for all patients (used in model fit)
+    Xagg <- cbind(rep(1,ni),
+                  c(rep(0,2),rep(1,4),rep(0,ni-6)),
+                  c(rep(0,6),rep(1,ni-6)))
+    
+    Xplcb <- cbind(Xagg[,1], ## ni = 9
+                   Xagg[,2],
+                   rep(0,ni), 
+                   Xagg[,3],
+                   rep(0,ni))
+    Xtrt <- cbind(Xagg[,1], ## ni = 9
+                  rep(0,ni), 
+                  Xagg[,2],
+                  rep(0,ni),
+                  Xagg[,3])
     for ( ipat in 1 : Npat)
       {
+        ## placebo
+        if (trtAss.pat[ipat]==0){
+          X <- Xplcb 
+        }else if (trtAss.pat[ipat]==1) X <- Xtrt ## trt
         ## the number of repeated measures are the same
         ## we assume that the time effects occurs once after the treatments are in effect
-        got <- rnbinom(ni,size = exp(beta0+beta1*timecov), prob = gsBASE[ipat])         
+        got <- rnbinom(ni,size = exp(X%*%betasFull), prob = gs[ipat])         
         Y <- c(Y,got)
+        ## XforFit and XforTCPI must be the same if piTRT = 0
+        XforFit <- rbind(XforFit,Xagg)
+        if (trueCPI) XforTCPI <- rbind(XforTCPI,X)
       }
-    ##cat("beta0",beta0,"\n")
+    colnames(XforFit) <- c("Intercept","timeInt1","timeInt2")
+
     d <- data.frame(Y=Y,
-                    X1=rep(1,Npat*ni),
-                    X2=rep(timecov,Npat),
+                    XforFit,
                     ID=rep(1:Npat,each=ni),
-                    gsBASE = rep(gsBASE,each=ni),
-                    scan = rep(1:ni,Npat),
+                    gs = rep(gs,each=ni),
+                    scan = rep(-1:(ni-2),Npat),
                     ## day contains the day when the scan was taken
                     ## 10 patients enter a trial every month
                     days = days,
-                    hs = rep(hs,each=ni)
-                    )
+                    hs = rep(hs,each=ni),
+                    trtAss =rep(trtAss.pat,each=ni))
 
-    ## dSMB visit is assumed to be every 4 months
+    if (trueCPI){
+      d$XforTCPI <- XforTCPI
+    }
+    ## DSMB visit is assumed to be every 4 months
     if (full) return (d) 
     d <- subset(d,subset= days <= DSMBVisitInterval*rev)
     d$labelnp <- rep(0,nrow(d))
     d$labelnp[ DSMBVisitInterval*(rev-1) < d$days ] <- 1
     ## The first two scans (screening and base-line scans are treated as pre-scans)
-    d$labelnp[ d$X2==0 ] <- 0
-
-    if (dist=="b2")
-      {
-        temp <- index.b.each(Y=d$Y,ID=d$ID,labelnp=d$labelnp,X=cbind(d$X1,d$X2),
-                             betas=c(beta0,beta1),aGs=c(aG1,aG2),rGs=c(rG1,rG2),pis=c(pi,1-pi))
-        d$probIndex <- c(temp,rep(NA,nrow(d)-length(temp) ))
-      }else if (dist=="b")
+    d$labelnp[ d$scan <= 0 ] <- 0
+    betsAgg <- c(betasFull[1],
+                 aggBeta(bets=betasFull[2:3],piTRT=piTRT),
+                 aggBeta(bets=betasFull[4:5],piTRT=piTRT))
+      
+    if (mod == 0){
+      XX <- cbind(d$Intercept,d$timeInt1, d$timeInt2)
+      if (dist=="b")
         {
-          temp <- index.b.each(Y=d$Y,ID=d$ID,labelnp=d$labelnp,X=cbind(d$X1,d$X2),
-                               betas=c(beta0,beta1),aGs=c(aG1),rGs=c(rG1),pis=c(1))
-          d$probIndex <- c(temp,rep(NA,nrow(d)-length(temp)) )
-        }else if (dist=="g"){
-
-          temp <- index.gammas(Y=d$Y,ID=d$ID,labelnp=d$labelnp,X=cbind(d$X1,d$X2),
-                              betas=c(beta0,beta1),
-                              shapes=c(sc1,sc2), ## shape
-                              scales=c(sp1,sp2), ## scale
-                              pis=c(pi,1-pi))
-          d$probIndex <- c(temp,rep(NA,nrow(d)-length(temp)) )
+          temp <- index.b.each(Y=d$Y,ID=d$ID,labelnp=d$labelnp,X=XX,
+                               betas=betsAgg,aGs=aG1,rGs=rG1,pis=1)
+          if (trueCPI){
+            tCPI <- index.b.each(Y=d$Y,ID=d$ID,labelnp=d$labelnp,X=d$XforTCPI,
+                                 betas=betasFull,aGs=aG1,rGs=rG1,pis=1)
+          }
+        }else if (dist=="b2"){
+          temp <- index.b.each(Y=d$Y,ID=d$ID,labelnp=d$labelnp,X=XX,
+                                betas=betsAgg,aGs=c(aG1,aG2),rGs=c(rG1,rG2),pis=c(pi,1-pi))  
+          if (trueCPI){
+             tCPI <- index.b.each(Y=d$Y,ID=d$ID,labelnp=d$labelnp,X=d$XforTCPI,
+                                  betas=betasFull,aGs=c(aG1,aG2),rGs=c(rG1,rG2),pis=c(pi,1-pi))
+          }
         }else if (dist == "YZ"){
           
-          temp <- index.YZ(Y=d$Y,ID=d$ID,labelnp=d$labelnp,X=cbind(d$X1,d$X2),
-                           betas=c(beta0,beta1),
+          temp <- index.YZ(Y=d$Y,ID=d$ID,labelnp=d$labelnp,X=XX,
+                           betas=betsAgg,
                            shape=shape, ## shape
                            scale=scale, ## scale
-                           mu=mu,
-                           sd=sd,
-                           pi=pi)
-          d$probIndex <- c(temp,rep(NA,nrow(d)-length(temp)) )
-            
+                           mu=mu,sd=sd,pi=pi)
+          if (trueCPI){
+            tCPI <- index.YZ(Y=d$Y,ID=d$ID,labelnp=d$labelnp,X=d$XforTCPI,
+                             betas=betasFull,
+                             shape=shape, ## shape
+                             scale=scale, ## scale
+                             mu=mu,sd=sd,pi=pi)
           }
-
-    if (mod==0) return(d)
-
-    if (mod==3){
+        }
       
-      Npat <- length(unique(d$ID))
-      outputMod3$infoPara$maxD <- 5
-      return(outputMod3)
-
-    }else if (mod == 4){
-      
-      Npat <- length(unique(d$ID))
-      mu_beta <- c(0,0)
-      Sigma_beta <- diag(c(5,5))
-      a_qG <- 1
-      r_qG <- 1
-      
-      outputMod4 <- list(
-                         mu_beta=mu_beta,Sigma_beta=Sigma_beta,
-                         ##a_qG=a_qG,r_qG=r_qG,
-                         a_D = 0.01, ib_D=ib_D,
-                         ##maxD=5,
-                         max_aG = 30
-                         )
-      return(list(UinfoPara=outputMod4))
+      d$betas <- c(betsAgg,rep(NA,nrow(d)-length(betsAgg)))
+      d$probIndex <- c(temp,rep(NA,nrow(d)-length(temp) ))
+      if (trueCPI){
+        d$probIndexTRUE <- c(tCPI,rep(NA,nrow(d)-length(tCPI) ))
+      }
+      return(d)
     }
-  }
+    ## ======= mod == 4, 5 or 6 only get to here ===========
+    Npat <- length(unique(d$ID))
+    maxDs <- seq(0.01,5,0.01); Ktilde <- 2
+    ekn <- E.KN(maxDs=maxDs,N=Npat)
+    ib_D <- maxDs[min(which(ekn >= Ktilde))]
+    a_D <- 0.0001
 
+    if (mod == 4){
+      ## Uninformative priors 
+      outputMod4 <- list(a_D = a_D, ib_D=ib_D, max_aG = 30)
+      return(outputMod4)
+    }else if (mod== 5){
+      ## ======= mod == 5 or 6 only get to here ===========
+      ## Informative priors under the placebo assumption
+      if (IFN){
+        ## Data is developed based only on IFN
+        info.var <- matrix( round(c( 0.07080114,     -0.03561139,     -0.03559668,
+                                    -0.03561139,      0.03365417,      0.02763631,
+                                    -0.03559668,      0.02763631,      0.04543372
+                                    ),4),nrow=3,ncol=3)
+        info.mean <- c(1.3863398,       0.0283592,      -0.1943629)
+      }else{
+        ## Data is developed based on ALL datasets
+         info.var <- matrix( round(c( 0.06839318,     -0.02308660,     -0.02048146,
+                                     -0.02308660,      0.01734085,      0.01097764,
+                                     -0.02048146,      0.01097764,      0.02616263 
+                                     ),4),nrow=3,ncol=3)
+         info.mean <- c(1.29761146,    0.02762343,    -0.16054429)
+       }
+      modName <- "I.plcb"
+    }else if (mod==6){
+      ## Informative priors under the random sample assumption
+      if (IFN){
+        ## Data is developed based only on IFN
+        info.var <- matrix(round(c(0.070822670, 0.001545587, 0.013108930,
+                                   0.001545587, 0.002311349, 0.004566084,
+                                   0.013108930, 0.004566084, 0.023280450
+                                   ),4),nrow=3,ncol=3,byrow=TRUE)
+        info.mean <- c(1.3864922, -0.5497916, -0.8054787)
+      }else{
+        ## Data is developed based on ALL datasets
+        info.var <- matrix(round(c(0.06840140, -0.03005920, -0.04469143,
+                                  -0.03005920,  0.07694164,  0.11925741,
+                                  -0.04469143,  0.11925741,  0.20175429
+                                   ),4),nrow=3,ncol=3,byrow=TRUE)
+        info.mean <- c(1.2976255, -0.3690132, -0.5293237)
+      }
+      modName <- "I.RS"
+    }
 
-
-## getSampleOld <- function(
-##                       iseed=911,
-##                       rev=4,
-##                       dist="b",
-##                       mod=0,
-##                       probs=seq(0,0.99,0.01),
-##                       ts = seq(0,0.99,0.01),
-##                       full= FALSE
-##                       )
-##   {
-##     ## mod = 0: generate sample
-##     ## mod = 1: quantiles of the true populations
-##     ## mod = 2: densities of the true populations
-##     ## mod = 3: parameters of the simulation model
-##     ## mod = 4: parameters for uninformative prior
-
-##     ## dist = "b","b2","b3","l","g" 
-
-##     ## if full = TRUE then full dataset is returned and rev is ignored
-##     ni <- 11
-##     Npat <- 180; ## upto review 4, Npat=160 in total this number must be divisible by NpatEnterPerMonth
-##     NpatEnterPerMonth <- 15
-##     DSMBVisitInterval <- 4 ## months
+    if (sum(d$timeInt2) == 0)
+      {
+        pick.ind <- 1:2
+        info.var <- info.var[pick.ind,pick.ind]
+        info.mean <- info.mean[pick.ind]
+      }
+    infoPara <- list(max_aG=30, a_D=a_D, ib_D = ib_D,
+                     mu_beta=info.mean,
+                     Sigma_beta=info.var,
+                     mod=mod,modName=modName)
+    return(infoPara)
     
-
-##     ## === necessary for mod= 0, 3 and mod = 4
-##     ## d contains a full dataset
-##     days <- NULL
-##     for (ipatGroup in 1 : (Npat/NpatEnterPerMonth))
-##       {
-##         ScandaysForSingleGroup <- ipatGroup:(ipatGroup+ni-1)
-##         days <- c(days,rep(ScandaysForSingleGroup,NpatEnterPerMonth))
-##       }
-
-##     set.seed(iseed)
-##     if (dist=="g") ## need to went through by all mod=0,...,4
-##       {
-##         ## r.e. mixture of two gamma distributions
-##         pi <- 0.7
-##         sp1 <- 0.3; sc1 <- 0.5
-##         sp2 <- 4; sc2 <- 0.8
-##         beta0 <- 0.5
-##         beta1 <- 0
-##         hs <- sample(1:2,Npat,c(pi,1-pi),replace=TRUE)
-##         Npat_dist1 <- sum(hs==1)
-##         Npat_dist2 <- sum(hs==2)
-
-##         gsBASE <- rep(NA,Npat)
-##         gsBASE[hs==1] <- rgamma(Npat_dist1,shape=sp1,scale=sc1)
-##         gsBASE[hs==2] <- rgamma(Npat_dist2,shape=sp2,scale=sc2)
-##         gsBASE <- 1/(1+gsBASE)
-        
-##         if (mod==1)
-##           {
-##             F_inv_gam <- function(p,sp1,sc1,sp2,sc2,pi)
-##               {
-##                 G = function (t)
-##                   pi*pgamma(t,shape=sp1,scale=sc1)+(1-pi)*pgamma(t,shape=sp2,scale=sc2) - p
-##                 return(uniroot(G,c(0,100))$root)
-##               }
-##             lq <- length(probs);
-##             quan <- rep(NA,lq);
-##             for (i in 1 : lq) quan[i] <- F_inv_gam(p=probs[i],sp1=sp1,sc1=sc1,sp2=sp2,sc2=sc2,pi=pi)
-##             quan = sort(1/(1+quan))
-            
-##             return (rbind(probs=probs,quantile=quan))
-
-##           }else if (mod == 2){
-            
-##             ts.trans <-1/ts-1
-##             return ((pi*dgamma(ts.trans,shape=sp1,scale=sc1)+(1-pi)*dgamma(ts.trans,shape=sp2,scale=sc2) )*(1/ts^2))
-            
-##           }else if (mod == 3){
-            
-##             c1 <- momentsGL(EG=sp1*sc1,VG=sp1*sc1^2,beta=beta0) ## expectation and variance of Y
-##             c2 <- momentsGL(EG=sp2*sc2,VG=sp2*sc2^2,beta=beta0)
-            
-##             outputMod3 <- list(infoPara = list(mu_beta=c(beta0,beta1),
-##                                  Sigma_beta=diag(c(0.05,0.05)),a_qG=100,r_qG=1),
-##                                beta0=beta0,beta1=beta1,K=2,
-##                                scales=c(sc1=sc1,sc2=sc2),
-##                                shapes=c(sp1=sp1,sp2=sp2),
-##                                c1=c1,c2=c2
-##                                )
-##           }
-##       }else if (dist== "l"){
-        
-##         ## single log-normal distribution
-##         ## E(Y)=exp(beta)*E(G)=exp(1)*exp(meanlog+sdlog^2/2)= 5.078419
-##         beta0 <- 1.2
-##         beta1 <- -0.1
-##         meanlog <- -2
-##         sdlog <- 1.5
-##         gsBASE <- rlnorm(Npat,meanlog=meanlog,sdlog=sdlog)
-##         gsBASE <- 1/(1+gsBASE)
-##         quan <- qlnorm(probs,meanlog=meanlog,sdlog=sdlog)
-##         hs <- rep(1,Npat)
-##         if (mod==1){
-##           return( 
-##                  rbind(probs=probs,
-##                        quantile=sort(1/(1+quan))
-##                        )
-##                  )
-##         }else if (mod==2){
-          
-##           ts.trans <-1/ts-1
-##           return(dlnorm(ts.trans,meanlog=meanlog,sdlog=sdlog)*(1/ts^2))
-          
-##         }else if (mod == 3){
-          
-##           c1 <- momentsGL(EG=exp(meanlog+sdlog^2/2),
-##                           VG=(exp(sdlog^2)-1)*exp(2*meanlog+sdlog^2),
-##                           beta=beta0)
-          
-##           outputMod3 <- list(infoPara = list(mu_beta=c(beta0,beta1),
-##                                Sigma_beta=diag(c(0.05,0.05)),a_qG=100,r_qG=1),
-##                              beta0=beta0,beta1=beta1,K=1,c1=c1,meanlog=meanlog,sdlog=sdlog
-##                              )
-##         }
-        
-##       }else if (dist == "b"){
-        
-
-##         beta0 <- 1
-##         beta1 <- 0.1
-##         aG1 <- 3
-##         rG1 <- 0.8
-        
-##         gsBASE <- rbeta(Npat,aG1,rG1)
-##         hs <- rep(1,Npat)
-##         if (mod==1){
-##           return( 
-##                  rbind(probs=probs,
-##                        quantile=qbeta(probs,shape1=aG1,shape2=rG1)
-##                        )
-##                  )
-##         }else if (mod==2){
-          
-##           return (dbeta(ts,shape1=aG1,shape2=rG1))
-          
-##         }else if (mod == 3){
-          
-##           c1 <- momentsBeta(aG1,rG1,beta0)
-##           outputMod3 <- list(infoPara = list(mu_beta=c(beta0,beta1),
-##                                Sigma_beta=diag(c(0.05,0.05)),a_qG=10,r_qG=1),
-##                              beta0=beta0,beta1=beta1,K=1,c1=c1, aGs=c(aG1=aG1),
-##                              rGs=c(rG1=rG1))
-##         }
-
-##       }else if (dist == "b2"){
-        
-##         ## mixture of two beta distributions
-##         ## cluster 1: E(Y)=exp(beta0)*mu_G=exp(2)*((aG1+rG1-1)/(aG1-1)+1)=3.098636 ## at initial time
-##         ## cluster 2: E(Y)=exp(beta0)*mu_G=exp(2)*((aG2+rG2-1)/(aG2-1)+1)=7.037196 ## at initial time
-##         pi <- 0.3
-##         temp <- rmultinom(1,Npat,c(pi,1-pi))
-##         Npat_dist1 <- temp[1,1]
-##         Npat_dist2 <- temp[2,1]
-        
-##         pi <- 0.3
-##         beta0 <- 1.5
-##         beta1 <- 0.1
-        
-##         aG1 <- 10
-##         rG1 <- 10
-##         aG2 <- 20
-##         rG2 <- 1
-
-##         ## generate the initial random effect values of everyone
-##         hs <- sample(1:2,Npat,c(pi,1-pi),replace=TRUE)
-##         Npat_dist1 <- sum(hs==1)
-##         Npat_dist2 <- sum(hs==2)
-        
-##         gsBASE <- rep(NA,Npat)
-##         gsBASE[hs==1] <- rbeta(Npat_dist1,aG1,rG1);
-##         gsBASE[hs==2] <- rbeta(Npat_dist2,aG2,rG2);
-##         if (mod==1){
-##           F_inv_beta2 <- function(p,aG1,rG1,aG2,rG2,pi)
-##             {
-##               G = function (t) pi*pbeta(t,shape1=aG1,shape2=rG1)+(1-pi)*pbeta(t,shape1=aG2,shape2=rG2) - p
-##               return(uniroot(G,c(0,1000))$root)
-##             }
-##           lq <- length(probs);
-##           quant <- rep(NA,lq);
-##           for (i in 1 : lq) quant[i] <- F_inv_beta2(p=probs[i],aG1,rG1,aG2,rG2,pi=pi)
-##           return (rbind(probs=probs,quantile=quant))
-##         }
-##         else if (mod==2){
-
-##           return ((pi*dbeta(ts,shape1=aG1,shape2=rG1)+(1-pi)*dbeta(ts,shape1=aG2,shape2=rG2)) )
-##         }else if (mod == 3){
-
-##           c1 <- momentsBeta(aG1,rG1,beta0)
-##           c2 <- momentsBeta(aG2,rG2,beta0)
-##           outputMod3 <-  list(infoPara = list(mu_beta=c(beta0,beta1),
-##                                 Sigma_beta=diag(c(0.05,0.05)),a_qG=100,r_qG=1),
-##                               beta0=beta0,beta1=beta1,K=2,c1=c1,c2=c2,
-##                               aGs=c(aG1=aG1,aG2=aG2),
-##                               rGs=c(rG1=rG1,rG2=rG2)
-##                               )
-##         }
-##       }
-##       else if (dist == "b3")
-##         {
-##           ## mixture of three beta distributions
-          
-##           beta0 <- 1
-##           beta1 <- 0.1
-##           p1 <- 0.1
-##           p2 <- 0.2
-##           aG1 <- 5
-##           rG1 <- 17
-##           aG2 <- 25
-##           rG2 <- 19
-##           aG3 <- 20
-##           rG3 <- 1
-          
-##           ## need modif
-##           hs <- sample(1:3,Npat,c(p1,p2,1-p1-p2),replace=TRUE)
-##           Npat_dist1 <- sum(hs==1)
-##           Npat_dist2 <- sum(hs==2)
-##           Npat_dist3 <- sum(hs==3)
-          
-##           gsBASE <- rep(NA,Npat)
-##           gsBASE[hs==1] <- rbeta(Npat_dist1,aG1,rG1);
-##           gsBASE[hs==2] <- rbeta(Npat_dist2,aG2,rG2);
-##           gsBASE[hs==3] <- rbeta(Npat_dist3,aG3,rG3);
-##           ## 
-
-          
-##           if (mod==1)
-##             {
-##               F_inv_beta3 <- function(p,aG1,rG1,aG2,rG2,aG3,rG3,p1,p2)
-##                 {
-##                   G = function (t)
-##                     p1*pbeta(t,shape1=aG1,shape2=rG1)+p2*pbeta(t,shape1=aG2,shape2=rG2)+(1-p1-p2)*pbeta(t,shape1=aG3,shape2=rG3)-p
-##                   return(uniroot(G,c(0,1000))$root)
-##                 }
-##               lq <- length(probs);
-##               quant <- rep(NA,lq);
-##               for (i in 1 : lq) quant[i] <- F_inv_beta3(p=probs[i],aG1,rG1,aG2,rG2,aG3,rG3,
-##                                                         p1=p1,
-##                                                         p2=p2)
-##               return (rbind(probs=probs,quantile=quant))
-##             }else if (mod==2)
-##               {
-##                 return (p1*dbeta(ts,shape1=aG1,shape2=rG1)+p2*dbeta(ts,shape1=aG2,shape2=rG2)+(1-p1-p2)*dbeta(ts,shape1=aG3,shape2=rG3 ))
-##               }else if (mod == 3){
-##                 c1 <- momentsBeta(aG1,rG1,beta0)
-##                 c2 <- momentsBeta(aG2,rG2,beta0)
-##                 c3 <- momentsBeta(aG3,rG3,beta0)
-##                 outputMod3 <-  list(infoPara = list(mu_beta=c(beta0,beta1),
-##                                       Sigma_beta=diag(c(0.05,0.05)),a_qG=100,r_qG=1),
-##                                     beta0=beta0,beta1=beta1,K=3,c1=c1,c2=c2,c3=c3,
-##                                     aGs=c(aG1=aG1,aG2=aG2,aG3=aG3),
-##                                     rGs=c(rG1=rG1,rG2=rG2,rG3=rG3)
-##                                     )
-##               }
-##         }
-
-##     ## generate samples for dist = "b","b3", "g", and "l" (except "b2")
-##     Y <- NULL
-##     timecov <- c(0,0,(1:(ni-2)))
-##     for ( ipat in 1 : Npat)
-##       {
-##         ## the number of repeated measures are the same
-##         ## we assume that the time effects occurs once after the treatments are in effect
-##         got <- rnbinom(ni,size = exp(beta0+beta1*timecov), prob = gsBASE[ipat])         
-##         Y <- c(Y,got)
-##       }
-##     cat("beta0",beta0,"\n")
-
-
-##     d <- data.frame(Y=Y,
-##                     X1=rep(1,Npat*ni),
-##                     X2=rep(timecov,Npat),
-##                     ID=rep(1:Npat,each=ni),
-##                     gsBASE = rep(gsBASE,each=ni),
-##                     scan = rep(1:ni,Npat),
-##                     ## day contains the day when the scan was taken
-##                     ## 10 patients enter a trial every month
-##                     days = days,
-##                     hs = rep(hs,each=ni)
-##                     )
-
-##     ## dSMB visit is assumed to be every 4 months
-##     if (full) return (d) 
-##     d <- subset(d,subset= days <= DSMBVisitInterval*rev)
-##     d$labelnp <- rep(0,nrow(d))
-##     d$labelnp[ DSMBVisitInterval*(rev-1) < d$days ] <- 1
-##     ## The first two scans (screening and base-line scans are treated as pre-scans)
-##     d$labelnp[ d$X2==0 ] <- 0
-
-##     if (dist=="b2")
-##       {
-##         temp <- index.b.each(Y=d$Y,ID=d$ID,labelnp=d$labelnp,X=cbind(d$X1,d$X2),
-##                              betas=c(beta0,beta1),aGs=c(aG1,aG2),rGs=c(rG1,rG2),pis=c(pi,1-pi))
-##         d$probIndex <- c(temp,rep(NA,nrow(d)-length(temp) ))
-##       }else if (dist=="b")
-##         {
-##           temp <- index.b.each(Y=d$Y,ID=d$ID,labelnp=d$labelnp,X=cbind(d$X1,d$X2),
-##                                betas=c(beta0,beta1),aGs=c(aG1),rGs=c(rG1),pis=c(1))
-##           d$probIndex <- c(temp,rep(NA,nrow(d)-length(temp)) )
-##         }else if (dist=="g"){
-
-##           temp <- index.gammas(Y=d$Y,ID=d$ID,labelnp=d$labelnp,X=cbind(d$X1,d$X2),
-##                               betas=c(beta0,beta1),
-##                               shapes=c(sc1,sc2), ## shape
-##                               scales=c(sp1,sp2), ## scale
-##                               pis=c(pi,1-pi))
-##           d$probIndex <- c(temp,rep(NA,nrow(d)-length(temp)) )
-##         }
-
-##     if (mod==0) return(d)
-
-##     if (mod==3){
-      
-##       Npat <- length(unique(d$ID))
-##       r_D <- 1
-##       a_D <- 2.3 ## uniroot(f=K_NisK,
-##       ##        interval=c(0.003,50),
-##       ##        rD=r_D,N=100*2,
-##       ##        K=10)$root
-##       outputMod3$infoPara$a_D <- a_D
-##       outputMod3$infoPara$r_D <- 1
-##       outputMod3$infoPara$maxD <- 5
-##       return(outputMod3)
-
-##     }else if (mod == 4){
-      
-##       Npat <- length(unique(d$ID))
-##       r_D <- 1
-##       a_D <- 2.3 ## uniroot(f=K_NisK,
-##       ##        interval=c(0.003,50),
-##       ##        rD=r_D,N=100*2,
-##       ##        K=10)$root
-##       mu_beta <- c(0,0)
-##       Sigma_beta <- diag(c(5^2,5^2))
-##       a_qG <- 1
-##       r_qG <- 1
-      
-##       outputMod4 <- list(
-##                          mu_beta=mu_beta,Sigma_beta=Sigma_beta,
-##                          a_qG=a_qG,r_qG=r_qG,
-##                          a_D=a_D,r_D=r_D,
-##                          M=M,maxD=5,max_aG = 30
-##                          )
-##       return(list(UinfoPara=outputMod4))
-##     }
-##   }
-
+  }
 
 getTrueProb <- function(aG1=0.5,rG1=0.5,aG2=3,rG2=0.8,dist="gamma")
   {
@@ -2501,8 +1816,12 @@ getM <- function(epsilonM,a_D,r_D,prob)
     return(round(1+ log(epsilonM)/(log(Dbig/(1+Dbig))),0))
   }
 
-Nuniq <-function(test,sampleindex){
-  tt <- apply(test$h1[sampleindex,],1,unique)
+Nuniq <-function(test,sampleindex=NULL){
+  if (is.null(sampleindex)){
+    tt <- apply(test$h1,1,unique)
+  }else{
+    tt <- apply(test$h1[sampleindex,],1,unique)
+  }
   return( unlist(lapply(tt,length)))
 }
 
@@ -2547,151 +1866,133 @@ colmeansd <- function (mat, name = NULL, sigDig = 2, sigDigSD = NULL)
 
 
 
-## E(K|N,D) digamma(D+N)-digamma(D) ~= D*log(1+N/D) D*log(1+N/D)
-K_N.D <- function(D,N=200) D*log(1+N/D)
 
-## E(K|N) = E(E(K|N,D)) where D ~ gamma(shape=aD,scale1/rD)
-## E(L|N) depends on aD and rD and N
-K_N <- function(aD,rD,N)
-  {
-    f <- function(D,N,rD,aD) log(1+N/D)*exp(-rD*D)*D^aD
-    k <- integrate(f=f,N=N,rD=rD,aD=aD,lower=0,upper=Inf)
-    return(k$value*rD^aD/gamma(aD))
-  }
-
-
-K_NisK <- function(aD,rD,N,K)
-  {
-    return(K_N(aD,rD,N)-K)
-  }
-
-
-inpheatmap <- function(mat)
-  {
-    B = nrow(mat)
-    mat <- .Call("map_c",
-                 as.integer(c(mat)),
-                 as.integer(ncol(mat)),
-                 as.integer(B), package = "lmeNBBayes")/B
-    diag(mat) = 1;
-    return(mat);
-  }
+## inpheatmap <- function(mat)
+##   {
+##     B = nrow(mat)
+##     mat <- .Call("map_c",
+##                  as.integer(c(mat)),
+##                  as.integer(ncol(mat)),
+##                  as.integer(B), package = "lmeNBBayes")/B
+##     diag(mat) = 1;
+##     return(mat);
+##   }
 
 
 
-hm <- function(matBN,
-               aveCEL,
-               main="",
-               minbin=0.5)
-  {
-    ## This function is designed to summarize a dataset such that
-    ## the random effects of the first 100 pat are from dist1 and
-    ## the random effects of second 100 pat are from dist2.
+## hm <- function(matBN,
+##                aveCEL,
+##                main="",
+##                minbin=0.5)
+##   {
+##     ## This function is designed to summarize a dataset such that
+##     ## the random effects of the first 100 pat are from dist1 and
+##     ## the random effects of second 100 pat are from dist2.
 
-    ## Input is a B by N matrix, each row contains the cluster labels
-    ## Based on this input, first, compute the similarity matrix:
-    inphm <- inpheatmap(matBN)
-    m.hmps <- 1 - inphm
-    ord <- 1:ncol(matBN)
+##     ## Input is a B by N matrix, each row contains the cluster labels
+##     ## Based on this input, first, compute the similarity matrix:
+##     inphm <- inpheatmap(matBN)
+##     m.hmps <- 1 - inphm
+##     ord <- 1:ncol(matBN)
 
-    ## reorder the patients within dist1/dist2 based on the dissimilarity measure 
-    ## ord <- c(order.dendrogram(as.dendrogram(hclust(dist(m.hmps)))))
+##     ## reorder the patients within dist1/dist2 based on the dissimilarity measure 
+##     ## ord <- c(order.dendrogram(as.dendrogram(hclust(dist(m.hmps)))))
 
-    spacedID <- rep(NA,ncol(matBN))
-    for (i in 1 : ncol(matBN))
-      {
-        if (aveCEL[i]  < 0.5 )
-          spacedID[i] <- ""
-        if (aveCEL[i] >= 0.5 & aveCEL[i]  < 1 )
-          spacedID[i] <- "-"
-        else if (aveCEL[i] >= 1 & aveCEL[i]  < 2 )
-          spacedID[i] <- "--"
-        else if (aveCEL[i] >= 2 & aveCEL[i]  < 3 )
-          spacedID[i] <- "---"
-        else if (aveCEL[i] >= 3 & aveCEL[i]  < 4 )
-          spacedID[i] <- "----"
-        else if (aveCEL[i] >= 4 & aveCEL[i]  < 5 )
-          spacedID[i] <- "-----"
-        else if (aveCEL[i] >= 5 & aveCEL[i]  < 6 )
-          spacedID[i] <- "------"
-        else if (aveCEL[i] >= 6 & aveCEL[i]  < 7 )
-          spacedID[i] <- "-------"
-        else if (aveCEL[i] >= 7 & aveCEL[i]  < 8 )
-          spacedID[i] <- "--------"
-        else if (aveCEL[i] >= 8 & aveCEL[i]  < 9 )
-          spacedID[i] <- "---------"
-        else if (aveCEL[i] >= 9 & aveCEL[i]  < 10)
-          spacedID[i] <- "----------"
-        else if (aveCEL[i] >= 10)
-          spacedID[i] <- "-----------"
-      }
-    rownames(inphm) <- colnames(inphm) <- spacedID
+##     spacedID <- rep(NA,ncol(matBN))
+##     for (i in 1 : ncol(matBN))
+##       {
+##         if (aveCEL[i]  < 0.5 )
+##           spacedID[i] <- ""
+##         if (aveCEL[i] >= 0.5 & aveCEL[i]  < 1 )
+##           spacedID[i] <- "-"
+##         else if (aveCEL[i] >= 1 & aveCEL[i]  < 2 )
+##           spacedID[i] <- "--"
+##         else if (aveCEL[i] >= 2 & aveCEL[i]  < 3 )
+##           spacedID[i] <- "---"
+##         else if (aveCEL[i] >= 3 & aveCEL[i]  < 4 )
+##           spacedID[i] <- "----"
+##         else if (aveCEL[i] >= 4 & aveCEL[i]  < 5 )
+##           spacedID[i] <- "-----"
+##         else if (aveCEL[i] >= 5 & aveCEL[i]  < 6 )
+##           spacedID[i] <- "------"
+##         else if (aveCEL[i] >= 6 & aveCEL[i]  < 7 )
+##           spacedID[i] <- "-------"
+##         else if (aveCEL[i] >= 7 & aveCEL[i]  < 8 )
+##           spacedID[i] <- "--------"
+##         else if (aveCEL[i] >= 8 & aveCEL[i]  < 9 )
+##           spacedID[i] <- "---------"
+##         else if (aveCEL[i] >= 9 & aveCEL[i]  < 10)
+##           spacedID[i] <- "----------"
+##         else if (aveCEL[i] >= 10)
+##           spacedID[i] <- "-----------"
+##       }
+##     rownames(inphm) <- colnames(inphm) <- spacedID
     
-    ## Finally, plot the levelplot
-    library(lattice)
-    xmins <- c(0.01,0.5,0.01,0.5)
-    xmaxs <- c(0.49,1,0.49,1)
-    ymins <- c(0.5,0.5,0.01,0.01)
-    ymaxs <- c(1,1,0.51,0.51)
-    levelplot(inphm[ord,ord],
-              labels = list(cex=0.01),
-              at = do.breaks(c(minbin, 1.01), 20),
-              scales = list(x = list(rot = 90)),
-              aspect = "iso",
-              colorkey=list(text=3,labels=list(cex=2)),
-              xlab= "",ylab="",
-              region = TRUE, 
-              col.regions=gray.colors(100,start = 1, end = 0),
-              main=paste(main,sep="")
-              ##,par.settings=list(fontsize=list(text=15))
-              )
+##     ## Finally, plot the levelplot
+##     library(lattice)
+##     xmins <- c(0.01,0.5,0.01,0.5)
+##     xmaxs <- c(0.49,1,0.49,1)
+##     ymins <- c(0.5,0.5,0.01,0.01)
+##     ymaxs <- c(1,1,0.51,0.51)
+##     levelplot(inphm[ord,ord],
+##               labels = list(cex=0.01),
+##               at = do.breaks(c(minbin, 1.01), 20),
+##               scales = list(x = list(rot = 90)),
+##               aspect = "iso",
+##               colorkey=list(text=3,labels=list(cex=2)),
+##               xlab= "",ylab="",
+##               region = TRUE, 
+##               col.regions=gray.colors(100,start = 1, end = 0),
+##               main=paste(main,sep="")
+##               ##,par.settings=list(fontsize=list(text=15))
+##               )
 
-    ## The posterior sample of label vector H1s contains the cluster labels.
-    ## The distinct advantage of our DP mixture model is its ability to classify the patients into 
-    ## the un-prespecified number of clusters.
-    ## 
-    ## Given B posterior samples of the label vectors of old scans H_1, for all combinations of the pairs of patients,
-    ## the average times that paired patients belong to the same cluster are recorded to create single Npat by Npat
-    ## similarity matrix. 
-    ## The level map is created with this similarity matrix where 
-    ## both row and column are reordered based on the result of hierarchical clustering on the similarity matrix (1-similarity matrix) 
-    ##
-  }
+##     ## The posterior sample of label vector H1s contains the cluster labels.
+##     ## The distinct advantage of our DP mixture model is its ability to classify the patients into 
+##     ## the un-prespecified number of clusters.
+##     ## 
+##     ## Given B posterior samples of the label vectors of old scans H_1, for all combinations of the pairs of patients,
+##     ## the average times that paired patients belong to the same cluster are recorded to create single Npat by Npat
+##     ## similarity matrix. 
+##     ## The level map is created with this similarity matrix where 
+##     ## both row and column are reordered based on the result of hierarchical clustering on the similarity matrix (1-similarity matrix) 
+##     ##
+##   }
 
-proG1LeG2 <- function(gsBbyN,g2sBbyN,beta=TRUE)
-  {
-    if (is.vector(gsBbyN))
-      {
-        gsBbyN <- matrix(gsBbyN,ncol=1)
-        g2sBbyN <- matrix(g2sBbyN,ncol=1)
-      }
-    if(beta)
-      {
-        ## compare gPre >= gNew which is equivalent to 
-        ## (1-gPre)/gPre <= (1-gNew)/gNew
-        temp <- gsBbyN 
-        gsBbyN <-g2sBbyN
-        g2sBbyN <- temp
-      }
-    ##temp <- gsBbyN-g2sBbyN <= 0
-    ## pG1G2 <- colMeans(temp)
+## proG1LeG2 <- function(gsBbyN,g2sBbyN,beta=TRUE)
+##   {
+##     if (is.vector(gsBbyN))
+##       {
+##         gsBbyN <- matrix(gsBbyN,ncol=1)
+##         g2sBbyN <- matrix(g2sBbyN,ncol=1)
+##       }
+##     if(beta)
+##       {
+##         ## compare gPre >= gNew which is equivalent to 
+##         ## (1-gPre)/gPre <= (1-gNew)/gNew
+##         temp <- gsBbyN 
+##         gsBbyN <-g2sBbyN
+##         g2sBbyN <- temp
+##       }
+##     ##temp <- gsBbyN-g2sBbyN <= 0
+##     ## pG1G2 <- colMeans(temp)
     
-    ##gsBbyN <- apply(gsBbyN,2,sort,decreasing=FALSE)
-    ##g2sBbyN <- apply(g2sBbyN,2,sort,decreasing=FALSE)
-    N <- ncol(gsBbyN)
-    pG1G2 <- colMeans(gsBbyN < g2sBbyN)
-    ## for (ipat in 1 : N)
-    ##   {
-    ##     g1 <- gsBbyN[,ipat]
-    ##     g2 <- g2sBbyN[,ipat]
-    ##     pG1G2[ipat] <-  .Call("pG1LeG2_c",
-    ##                           as.numeric(g1),
-    ##                           as.numeric(g2),
-    ##                           package = "lmeNBBayes"
-    ##                           )
-    ##   }
-    return(pG1G2)
-  }
+##     ##gsBbyN <- apply(gsBbyN,2,sort,decreasing=FALSE)
+##     ##g2sBbyN <- apply(g2sBbyN,2,sort,decreasing=FALSE)
+##     N <- ncol(gsBbyN)
+##     pG1G2 <- colMeans(gsBbyN < g2sBbyN)
+##     ## for (ipat in 1 : N)
+##     ##   {
+##     ##     g1 <- gsBbyN[,ipat]
+##     ##     g2 <- g2sBbyN[,ipat]
+##     ##     pG1G2[ipat] <-  .Call("pG1LeG2_c",
+##     ##                           as.numeric(g1),
+##     ##                           as.numeric(g2),
+##     ##                           package = "lmeNBBayes"
+##     ##                           )
+##     ##   }
+##     return(pG1G2)
+##   }
 
 pointsgamma<-function(shape,scale,xmin=0,xmax=5,main="")
   {
@@ -2760,187 +2061,205 @@ plotGs <- function(vec,main,xlim=c(0,8),upto=10,length.out=1000,breaks=seq(0,15,
 
 
 
-##=== Meta analysis function === ##
-rigamma <- function (n, shape, scale) 
-  {
-    if (shape > 0 & scale > 0) 
-      1/rgamma(n = n, shape=shape, scale=1/scale)
-    else stop("rigamma: invalid parameters\n")
-  }
-
-metaUnivGibb <- function(ys,
-### a vector of length Nstudy, containing the observed estimates
-                         sigmas2,
-### a vector of length Nstudy, containing the number of patients (or should it be the number of MS scan?) involved to estimate ys
-                         a=1,
-                         b=1,
-                         B=100000)
-  {
-    Nstudy <- length(ys)
-    
-    ## Model:
-    ## ys[istudy] ~ N(mean=theta[istudy],sd=sqrt(sigmas2[istudy]))
-    ## theta_i ~ N(mu,tau2)
-    ## mu ~ unif(-1000,1000)
-    ## tau2 ~ inv-gamma(shape=a,scale=b)
-    ## where i = 1,...,Nstudy and Nstudy is the number of dataset
-
-    ## In our MS clinical analysis context,
-    ## y_i = hat.beta_i (i=1,..,p) or hat.logaG_i
-    
-    ## informative prior construction
-    ## Y ~ inv-gamma(shape=a,scale=b) then E(Y)=b/(a-1) for a > 1, Var(Y)=b^2/((a-1)^2(a-2)) for a > 2
-    ## a <= 2 => infinite variance 
-    postThetas <- matrix(NA,B,Nstudy)
-    postMu <- rep(NA,B)
-    postTau2 <- rep(NA,B)
-    ## Initialization of unknown parameters
-    thetas <- rep(0,Nstudy)
-    mu <- mean(ys)
-    tau2 <- mean(sigmas2)
-    
-    for (iB in 1 : B)
-      {
-        if (iB %% 5000 == 0) cat("\n",iB, "iterations are done" )
-        ## Step 1: update theta_i
-        for (istudy in 1 : Nstudy)
-          {
-            vari <- 1/(1/sigmas2[istudy]+1/tau2)
-            thetas[istudy]<- rnorm(1,
-                                   mean=(ys[istudy]/sigmas2[istudy] + mu/tau2)*vari,
-                                   sd=sqrt(vari)
-                                   )
-          }
-        
-        mu <- rnorm(1,
-                    mean=sum(thetas)/Nstudy,
-                    sd=sqrt(tau2/Nstudy))
-        
-        tau2 <- rigamma(
-                        1,
-                        shape=(Nstudy/2+a),
-                        scale=sum((thetas-mu)^2)/2+b
-                        )
-        
-        postThetas[iB,] <- thetas
-        postMu[iB] <- mu
-        postTau2[iB] <- tau2
-      }
-    return(list(theta=postThetas,mu=postMu,tau2=postTau2))
-  }
-
-
-
-listSum<- function(listobj,burnin=0)
-  {
-    output <- listobj[[burnin+1]]
-    for (i in (burnin+2) : length(listobj))
-      {
-        output <- output +listobj[[i]]
-      }
-    return (output)
-  }
-
-
-listMean <- function(listobj,useSample)
-  {
-    if (is.null(useSample))
-      {
-        useSample <- 1: length(listobj)
-      }
-    output <- listobj[[useSample[1]]]
-    for (i in useSample[-1])
-      {
-        output <- output +listobj[[i]]
-      }
-    return (output/length(useSample))
-  }
-
-
-
-metaMultGibb <- function(hat.betas,
-                         ## p by N.study matrix, where p = # covariates 
-                         sigmas2,
-                         ## a list of covariance matrix 
-                         v0="uninfo",
-                         S0=NULL,
-                         B=10000)
-  {
-    ## TheWishart distribution is a multivariate analogue of the gamma distribution
-    Nstudy <- ncol(hat.betas)
-    p <- nrow(hat.betas)
-    sigmas2Inv <- lapply(sigmas2,solve)
-    ## Model:
-    ## hat.betas[[istudy]] ~ mvnorm(mean=betas[,istudy], var=sigmas2[[istudy]])
-    ## betas ~ mvnorm(mean=mu, var=tau2)
-    ## :::: prior :::: 
-    ## mu[i] ~ unif(-1000,1000), i = 1,...,p
-    ## tau2 ~ inv-wishart(v0,S0) <=> solve(tau2) ~ wishart(v0,solve(S0))
-    ## where i = 1,...,Nstudy and Nstudy is the number of dataset
-
-    ## In our MS clinical analysis context,
-    ## y_i = hat.beta_i (i=1,..,p) or hat.logaG_i
-
-
-    
-    ## The default values of hyperparameters
-    ## inverse-wisrt is centered at diag(p) with large variance
-    ## p109 Hogg
-    if (v0=="info"){
-      v0 <- 10
-      S0 <- diag(p)*(v0-p-1) ## Identity matrix
-      
-    }else if (v0=="uninfo"){
-      v0 <- p + 2
-      S0 <- diag(c(0.5,0.10)) ## Identity matrix
+mvrnorm <- function (n = 1, mu, Sigma, tol = 1e-06, empirical = FALSE) 
+{
+   ## borrowed from library MASS
+    p <- length(mu)
+    if (!all(dim(Sigma) == c(p, p))) 
+        stop("incompatible arguments")
+    eS <- eigen(Sigma, symmetric = TRUE, EISPACK = TRUE)
+    ev <- eS$values
+    if (!all(ev >= -tol * abs(ev[1L]))) 
+        stop("'Sigma' is not positive definite")
+    X <- matrix(rnorm(p * n), n)
+    if (empirical) {
+        X <- scale(X, TRUE, FALSE)
+        X <- X %*% svd(X, nu = 0)$v
+        X <- scale(X, FALSE, TRUE)
     }
+    X <- drop(mu) + eS$vectors %*% diag(sqrt(pmax(ev, 0)), p) %*% 
+        t(X)
+    nm <- names(mu)
+    if (is.null(nm) && !is.null(dn <- dimnames(Sigma))) 
+        nm <- dn[[1L]]
+    dimnames(X) <- list(nm, NULL)
+    if (n == 1) 
+        drop(X)
+    else t(X)
+}
+
+
+
+## ##=== Meta analysis function === ##
+## rigamma <- function (n, shape, scale) 
+##   {
+##     if (shape > 0 & scale > 0) 
+##       1/rgamma(n = n, shape=shape, scale=1/scale)
+##     else stop("rigamma: invalid parameters\n")
+##   }
+
+## metaUnivGibb <- function(ys,
+## ### a vector of length Nstudy, containing the observed estimates
+##                          sigmas2,
+## ### a vector of length Nstudy, containing the number of patients (or should it be the number of MS scan?) involved to estimate ys
+##                          a=1,
+##                          b=1,
+##                          B=100000)
+##   {
+##     Nstudy <- length(ys)
+    
+##     ## Model:
+##     ## ys[istudy] ~ N(mean=theta[istudy],sd=sqrt(sigmas2[istudy]))
+##     ## theta_i ~ N(mu,tau2)
+##     ## mu ~ unif(-1000,1000)
+##     ## tau2 ~ inv-gamma(shape=a,scale=b)
+##     ## where i = 1,...,Nstudy and Nstudy is the number of dataset
+
+##     ## In our MS clinical analysis context,
+##     ## y_i = hat.beta_i (i=1,..,p) or hat.logaG_i
+    
+##     ## informative prior construction
+##     ## Y ~ inv-gamma(shape=a,scale=b) then E(Y)=b/(a-1) for a > 1, Var(Y)=b^2/((a-1)^2(a-2)) for a > 2
+##     ## a <= 2 => infinite variance 
+##     postThetas <- matrix(NA,B,Nstudy)
+##     postMu <- rep(NA,B)
+##     postTau2 <- rep(NA,B)
+##     ## Initialization of unknown parameters
+##     thetas <- rep(0,Nstudy)
+##     mu <- mean(ys)
+##     tau2 <- mean(sigmas2)
+    
+##     for (iB in 1 : B)
+##       {
+##         if (iB %% 5000 == 0) cat("\n",iB, "iterations are done" )
+##         ## Step 1: update theta_i
+##         for (istudy in 1 : Nstudy)
+##           {
+##             vari <- 1/(1/sigmas2[istudy]+1/tau2)
+##             thetas[istudy]<- rnorm(1,
+##                                    mean=(ys[istudy]/sigmas2[istudy] + mu/tau2)*vari,
+##                                    sd=sqrt(vari)
+##                                    )
+##           }
+        
+##         mu <- rnorm(1,
+##                     mean=sum(thetas)/Nstudy,
+##                     sd=sqrt(tau2/Nstudy))
+        
+##         tau2 <- rigamma(
+##                         1,
+##                         shape=(Nstudy/2+a),
+##                         scale=sum((thetas-mu)^2)/2+b
+##                         )
+        
+##         postThetas[iB,] <- thetas
+##         postMu[iB] <- mu
+##         postTau2[iB] <- tau2
+##       }
+##     return(list(theta=postThetas,mu=postMu,tau2=postTau2))
+##   }
+
+
+
+
+
+## listMean <- function(listobj,useSample)
+##   {
+##     if (is.null(useSample))
+##       {
+##         useSample <- 1: length(listobj)
+##       }
+##     output <- listobj[[useSample[1]]]
+##     for (i in useSample[-1])
+##       {
+##         output <- output +listobj[[i]]
+##       }
+##     return (output/length(useSample))
+##   }
+
+
+
+## metaMultGibb <- function(hat.betas,
+##                          ## p by N.study matrix, where p = # covariates 
+##                          sigmas2,
+##                          ## a list of covariance matrix 
+##                          v0="uninfo",
+##                          S0=NULL,
+##                          B=10000)
+##   {
+##     ## TheWishart distribution is a multivariate analogue of the gamma distribution
+##     Nstudy <- ncol(hat.betas)
+##     p <- nrow(hat.betas)
+##     sigmas2Inv <- lapply(sigmas2,solve)
+##     ## Model:
+##     ## hat.betas[[istudy]] ~ mvnorm(mean=betas[,istudy], var=sigmas2[[istudy]])
+##     ## betas ~ mvnorm(mean=mu, var=tau2)
+##     ## :::: prior :::: 
+##     ## mu[i] ~ unif(-1000,1000), i = 1,...,p
+##     ## tau2 ~ inv-wishart(v0,S0) <=> solve(tau2) ~ wishart(v0,solve(S0))
+##     ## where i = 1,...,Nstudy and Nstudy is the number of dataset
+
+##     ## In our MS clinical analysis context,
+##     ## y_i = hat.beta_i (i=1,..,p) or hat.logaG_i
+
 
     
-    ## storages
-    postBetas <- postTau2 <- list()
-    postMu <- matrix(NA,p,B)
+##     ## The default values of hyperparameters
+##     ## inverse-wisrt is centered at diag(p) with large variance
+##     ## p109 Hogg
+##     if (v0=="info"){
+##       v0 <- 10
+##       S0 <- diag(p)*(v0-p-1) ## Identity matrix
+      
+##     }else if (v0=="uninfo"){
+##       v0 <- p + 2
+##       S0 <- diag(c(0.5,0.10)) ## Identity matrix
+##     }
 
-    ## Initialization of unknown parameters
-    betas <- matrix(0,nrow=p,ncol=Nstudy)
-    mu <- rowMeans(hat.betas)
-    tau2 <- listSum(sigmas2)/Nstudy
-    tau2Inv <- solve( tau2 )
     
-    for (iB in 1 : B)
-      {
-        if (iB %% 5000 == 0) cat("\n",iB, "iterations are done" )
-        ## Step 1: update betas[,istudy]
-        for (istudy in 1 : Nstudy)
-          {
-            vari <- solve(tau2Inv+sigmas2Inv[[istudy]] )
-            betas[,istudy]<- mvrnorm(1,
-                                     mu=vari%*%( tau2Inv%*%mu+sigmas2Inv[[istudy]]%*%hat.betas[,istudy]),
-                                     Sigma=vari
-                                     )
-          }
+##     ## storages
+##     postBetas <- postTau2 <- list()
+##     postMu <- matrix(NA,p,B)
 
-        mu <- mvrnorm(1,
-                      mu=rowSums(betas)/Nstudy, 
-                      Sigma=tau2/Nstudy
-                      )
+##     ## Initialization of unknown parameters
+##     betas <- matrix(0,nrow=p,ncol=Nstudy)
+##     mu <- rowMeans(hat.betas)
+##     tau2 <- listSum(sigmas2)/Nstudy
+##     tau2Inv <- solve( tau2 )
+    
+##     for (iB in 1 : B)
+##       {
+##         if (iB %% 5000 == 0) cat("\n",iB, "iterations are done" )
+##         ## Step 1: update betas[,istudy]
+##         for (istudy in 1 : Nstudy)
+##           {
+##             vari <- solve(tau2Inv+sigmas2Inv[[istudy]] )
+##             betas[,istudy]<- mvrnorm(1,
+##                                      mu=vari%*%( tau2Inv%*%mu+sigmas2Inv[[istudy]]%*%hat.betas[,istudy]),
+##                                      Sigma=vari
+##                                      )
+##           }
 
-
-        ## temp <- 0; for (istudy in 1 : Nstudy) temp <- temp + (betas[,istudy]-mu)%*%t(betas[,istudy]-mu)
-        ## generate sample from Inverse-Wishart distribution
-        Sn <- S0 + (betas-mu)%*%t(betas-mu) ## outer product sum_{istudy} (betas[,istudy]-mu)%*%t(betas[,istudy]-mu)
-        tau2Inv <- matrix(rWishart(n=1,
-                                   df=v0+Nstudy,
-                                   Sigma=solve(Sn)
-                                   ),p,p)
-
-        postMu[,iB] <- mu
-        postTau2[[iB]] <- tau2 <- solve(tau2Inv)
-        postBetas[[iB]] <- betas
-      }
-    return(list(betas=postBetas,mu=postMu,tau2=postTau2))
-  }
+##         mu <- mvrnorm(1,
+##                       mu=rowSums(betas)/Nstudy, 
+##                       Sigma=tau2/Nstudy
+##                       )
 
 
+##         ## temp <- 0; for (istudy in 1 : Nstudy) temp <- temp + (betas[,istudy]-mu)%*%t(betas[,istudy]-mu)
+##         ## generate sample from Inverse-Wishart distribution
+##         Sn <- S0 + (betas-mu)%*%t(betas-mu) ## outer product sum_{istudy} (betas[,istudy]-mu)%*%t(betas[,istudy]-mu)
+##         tau2Inv <- matrix(rWishart(n=1,
+##                                    df=v0+Nstudy,
+##                                    Sigma=solve(Sn)
+##                                    ),p,p)
+
+##         postMu[,iB] <- mu
+##         postTau2[[iB]] <- tau2 <- solve(tau2Inv)
+##         postBetas[[iB]] <- betas
+##       }
+##     return(list(betas=postBetas,mu=postMu,tau2=postTau2))
+##   }
 
 
 
@@ -4069,31 +3388,1241 @@ metaMultGibb <- function(hat.betas,
 
 
 
+## getSampleS <- function(iseed=1,propTreat=2/3,RedFactor=0.5,detail=FALSE)
+##   {
+##     ## The subset of patients in treatment arm experience the treatment effect
+##     ## Those with treatment effect decrease the expectation of CEL counts by RedFactor at every time point.
+##     ## RedFactor is constant over time.
+
+##     ## propTreat is the proportion of the patients in treatment arm with treatment effect
+    
+##     ## if full = TRUE then full dataset is returned and rev is ignored
+##     ni <- 8
+##     Npat <- 120;
+##     i.trt <- c(
+##                rep(1,round(Npat*propTreat*0.5)), ## 0.5 because half of the patients receive treatments
+##                rep(0,Npat-round(Npat*propTreat*0.5))
+##                )
+##     pi <- 0.3
+    
+##     beta0 <- 1.5
+##     beta1 <- -0.05
+    
+##     aG1 <- 10
+##     rG1 <- 10
+##     aG2 <- 20
+##     rG2 <- 1
+
+##     ## generate the initial random effect values of everyone
+##     hs <- sample(1:2,Npat,c(pi,1-pi),replace=TRUE)
+##     Npat_dist1 <- sum(hs==1)
+##     Npat_dist2 <- sum(hs==2)
+    
+##     gsBASE <- rep(NA,Npat)
+##     gsBASE[hs==1] <- rbeta(Npat_dist1,aG1,rG1);
+##     gsBASE[hs==2] <- rbeta(Npat_dist2,aG2,rG2);
+
+##     ## generate samples for dist = "b","b3", "g", and "l" (except "b2")
+##     Y <- NULL
+##     timecov <- c(0,0,(1:(ni-2)))
+##     for ( ipat in 1 : Npat)
+##       {
+##         ## the number of repeated measures are the same
+##         ## we assume that the treatment effects occurs once after the screening and baseline
+##         got <- rnbinom(ni,size = exp(beta0+beta1*timecov)*RedFactor^(i.trt[ipat]*(timecov>0)), prob = gsBASE[ipat])         
+##         Y <- c(Y,got)
+##       }
+##     ## cat("beta0",beta0,"\n")
+##     d <- data.frame(Y=Y,
+##                     X1=rep(1,Npat*ni),
+##                     X2=rep(timecov,Npat),
+##                     labelnp=rep(c(rep(0,2),rep(1,ni-2)),Npat), ## the first two scans are pre-scans 
+##                     ID=rep(1:Npat,each=ni),
+##                     gsBASE = rep(gsBASE,each=ni),
+##                     Treat = rep(1:0,each=(Npat/2)*ni), ## the first half of the patients receive treatment
+##                     effectTreat = rep(i.trt,each=ni),
+##                     hs = rep(hs,each=ni)
+##                     )
+
+##     if (detail)
+##       {
+##         E1G.1 <- momentsBeta(aG1,rG1,beta0)[3] ## E1G
+##         E1G.2 <- momentsBeta(aG2,rG2,beta0)[3]
+        
+##         E1G <- E1G.1*pi+E1G.2*(1-pi)
+
+##         E1s<-c(E1G,E1G.1,E1G.2)
+##         names(E1s) <- c("Overall","H=1","H=2")
+##         for (i in 1 : length(E1s))
+##           {
+##             noTreatEffect <- (E1s[i]-1)*exp(beta0+beta1*timecov)*RedFactor^(0*(timecov>0))
+##             TreatEffect <- (E1s[i]-1)*exp(beta0+beta1*timecov)*RedFactor^(1*(timecov>0))
+            
+##             rr <- rbind(noTreatEffect,TreatEffect)
+##             colnames(rr) <- timecov
+##             cat("\n The expected CEL counts E(Yt)",names(E1s)[i],"\n")
+##             print(rr)
+##           }
+##       }
+    
+##     return(d)
+##   }
+
+## ## E(K|N,D) digamma(D+N)-digamma(D) ~= D*log(1+N/D) D*log(1+N/D)
+## K_N.D <- function(D,N=200) D*log(1+N/D)
+
+## ## E(K|N) = E(E(K|N,D)) where D ~ gamma(shape=aD,scale1/rD)
+## ## E(L|N) depends on aD and rD and N
+## K_N <- function(aD,rD,N)
+##   {
+##     f <- function(D,N,rD,aD) log(1+N/D)*exp(-rD*D)*D^aD
+##     k <- integrate(f=f,N=N,rD=rD,aD=aD,lower=0,upper=Inf)
+##     return(k$value*rD^aD/gamma(aD))
+##   }
 
 
- mvrnorm <- function (n = 1, mu, Sigma, tol = 1e-06, empirical = FALSE) 
-{
-   ## borrowed from library MASS
-    p <- length(mu)
-    if (!all(dim(Sigma) == c(p, p))) 
-        stop("incompatible arguments")
-    eS <- eigen(Sigma, symmetric = TRUE, EISPACK = TRUE)
-    ev <- eS$values
-    if (!all(ev >= -tol * abs(ev[1L]))) 
-        stop("'Sigma' is not positive definite")
-    X <- matrix(rnorm(p * n), n)
-    if (empirical) {
-        X <- scale(X, TRUE, FALSE)
-        X <- X %*% svd(X, nu = 0)$v
-        X <- scale(X, FALSE, TRUE)
-    }
-    X <- drop(mu) + eS$vectors %*% diag(sqrt(pmax(ev, 0)), p) %*% 
-        t(X)
-    nm <- names(mu)
-    if (is.null(nm) && !is.null(dn <- dimnames(Sigma))) 
-        nm <- dn[[1L]]
-    dimnames(X) <- list(nm, NULL)
-    if (n == 1) 
-        drop(X)
-    else t(X)
-}
+## K_NisK <- function(aD,rD,N,K)
+##   {
+##     return(K_N(aD,rD,N)-K)
+##   }
+
+
+
+
+
+## nbinDPREchange <- function(Y,          ##   A vector of length sum ni, containing responses 
+##                            X,          ##   A sum ni by p matrix, containing covariate values. The frist column must be 1 (Intercept)
+##                            ID,         ##   A Vector of length sum ni, indicating patients
+##                            B = 105000, ##     A scalar, the number of Gibbs iteration 
+##                            burnin = 5000,  
+##                            printFreq = B,
+##                            M = NULL,
+##                            labelnp, ## necessary if probIndex ==1
+##                            epsilonM = 0.01,## nonpara
+##                            para = list(mu_beta = NULL,Sigma_beta = NULL,a_D = 0.01, ib_D = 5,max_aG=30)
+##                            )
+##   {
+
+##     ## This code generate samples from NBRE model with constant random effect ~ DP mixture of Beta
+##     if (is.vector(X)) X <- matrix(X,ncol=1)
+##     NtotAll <- length(Y)
+##     if (nrow(X)!= NtotAll) stop("nrow(X) ! = length(Y)")
+##     if (length(ID)!= NtotAll)  stop("length(ID)! = length(Y)")
+##     if (length(labelnp)!= NtotAll)  stop ("labelnp! = length(Y)")
+
+    
+##     dims <- dim(X)
+##     Ntot <- dims[1]
+##     pCov <- dims[2]
+##     ## cat("pCov",pCov)
+##     if (is.null(para$mu_beta))
+##       {
+##         para$mu_beta <- rep(0,pCov)
+##       }
+##     mu_beta <- para$mu_beta
+
+##     if (is.null(M)) M  <- round(1 + log(epsilonM)/log(para$ib_D/(1+para$ib_D)))
+##     if (is.null(para$Sigma_beta)) {
+##       para$Sigma_beta <-  diag(5,pCov)
+##     }
+##     Sigma_beta = para$Sigma_beta
+    
+##     evalue_sigma_beta <- eigen(Sigma_beta, symmetric = TRUE, only.values = TRUE)$values
+##     if (min(evalue_sigma_beta) <= 0) stop("Sigma_beta must be positive definite!")
+##     Inv_sigma_beta <- c( solve(Sigma_beta) )
+
+##     X <- c(X) ## {xij} = { x_{1,1},x_{2,1},..,x_{Ntot,1},x_{1,2},....,x_{Ntot,p} }
+
+##     ## change the index of ID to numeric from 1 to # patients
+##     temID <- ID  
+##     N <- length(unique(temID))
+##     uniID <- unique(temID)
+##     ID <- rep(NA,length(temID))
+##     for (i in 1 : length(uniID))
+##       {
+##         ID[temID == uniID[i]] <- i
+##       }
+    
+##     mID <- ID-1
+##     ## the labelnp of patients only with 1 (new scans) labels are replaced by all 0 (old scans)
+    
+##     maxni <- max(tapply(rep(1,length(ID)),ID,sum))
+##     Npat <- length(unique(ID))
+
+
+##     ## the labelnp of patients only with 1 (new scans) labels are replaced by all 0 (old scans)
+##     patwonew <- which(as.numeric(tapply((labelnp==0),ID,sum)==0)==1)
+##     for (i in 1 : length(patwonew)) labelnp[ID == patwonew[i]] <- 0
+
+##     re <- .Call("gibbsREchange",
+##                 as.numeric(Y),           ## REAL
+##                 as.numeric(X),           ## REAL
+##                 as.integer(mID),         ## INTEGER
+##                 as.integer(B),           ## INTEGER
+##                 as.integer(maxni),       ## INTEGER
+##                 as.integer(Npat),        ## INTEGER
+##                 as.numeric(labelnp),     ## REAL
+##                 as.numeric(para$max_aG),
+##                 as.numeric(para$mu_beta),     ## REAL
+##                 as.numeric(evalue_sigma_beta),  ## REAL
+##                 as.numeric(Inv_sigma_beta),  ## REAL
+##                 as.numeric(para$a_D),
+##                 as.numeric(para$ib_D),
+##                 as.integer(M),
+##                 as.integer(burnin),      ## INTEGER
+##                 as.integer(printFreq),
+##                 package = "lmeNBBayes"
+##                 )
+
+
+##     ## http://stackoverflow.com/questions/8720550/how-to-return-array-of-structs-from-call-to-c-shared-library-in-r
+##     ## for ( i in 1:4 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
+##     for ( i in 1 : 4 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
+##     for ( i in 5 : 8 ) re[[i]] <- matrix(re[[i]],B,Npat,byrow=TRUE)
+##     re[[9]] <- matrix(re[[9]],B,pCov,byrow=TRUE)
+##     names(re) <- c("aGs","rGs","vs","weightH1",
+##                    "h1s","h2s","g1s","g2s",
+##                    "beta",
+##                    "logL","D",
+##                    "AR","prp")
+
+##     re$para <- para
+##     re$para$M <- M
+##     names(re$AR) <-names(re$prp) <- c("aG", "rG","beta","D")
+    
+    
+##     return (re)
+##   }
+
+
+## DPfit <- function(Y,          ##   A vector of length sum ni, containing responses 
+##                   X,          ##   A sum ni by p matrix, containing covariate values. The frist column must be 1 (Intercept)
+##                   ID,         ##   A Vector of length sum ni, indicating patients
+##                   B = 105000, ##     A scalar, the number of Gibbs iteration 
+##                   burnin = 5000,  
+##                   printFreq = B,
+##                   model = "nonpara-unif",
+##                   M = NULL,
+##                   epsilonM = 0.01,## nonpara
+##                   prob=0.9,        ## nonpara
+##                   labelnp=NULL,
+##                   para = list(mu_beta = NULL,Sigma_beta = NULL,a_D = 1, r_D = 1, a_qG = 1, r_qG = 1,
+##                     mu_aG = 0,sd_aG = 2, mu_rG = 0,sd_rG = 2, Nclust=NULL),
+##                   initBeta=NULL
+##                   )
+##   {
+
+##     Ntot <- length(Y)
+
+
+##     ## === prior input check =====## 
+##     if (is.vector(X)) X <- matrix(X,ncol=1)
+    
+
+
+##     if (nrow(X)!= Ntot) stop ("nrow(X) ! = length(Y)")
+##     if (length(ID)!= Ntot)  stop ("length(ID)! = length(Y)")
+    
+##     if (is.null(para$a_qG)){
+##       para$a_qG <- 1
+##       cat("\n a_qG needs to be specified!! set to 1")
+##     }
+##     a_qG = para$a_qG
+    
+##     if (is.null(para$r_qG) ) {
+##       para$r_qG <- 1
+##       cat("\n r_qG needs to be specified!! set to 1")
+##     }
+##     r_qG = para$r_qG
+
+##     if (is.vector(X)) X <- matrix(X,ncol=1)
+##     pCov <- ncol(X)
+
+##     if (is.null(para$mu_beta))
+##       {
+##         para$mu_beta <- rep(0,pCov)
+##       }
+    
+##     mu_beta = para$mu_beta
+    
+##     if (is.null(para$Sigma_beta)) {
+##       para$Sigma_beta <-  diag(5,pCov)
+##     }
+##     Sigma_beta = para$Sigma_beta
+
+##     if (is.null(labelnp)) labelnp <- rep(0,length(Y))
+    
+    
+    
+
+##     KK <- para$Nclust
+##     if (!is.null(KK)){
+##       if (!is.null(para$a_D)) stop("Both KK and a_D are selected! must be one of them...")
+##       ## the total number of patients observed by irev^th review
+##       NtotID <- length(unique(ID))
+##       ## the number of patients whose new scans are observed at the irev^th review
+##       NnewID <- length(unique(ID[labelnp==1]))
+##       ## parameters
+##       para$a_D <- uniroot(f=K_NisK,interval=c(0.003,50),
+##                           rD=para$r_D,N=(NtotID+NnewID)*2,K=KK)$root
+      
+##     }
+##     a_D <- para$a_D
+    
+##     if (is.null(M)) M  <- round(1 + log(0.01)/log(5/(1+5)))
+
+##     ## change the index of ID to numeric from 1 to # patients
+##     temID <- ID  
+##     N <- length(unique(temID))
+##     uniID <- unique(temID)
+##     ID <- rep(NA,length(temID))
+##     for (i in 1 : length(uniID))
+##       {
+##         ID[temID == uniID[i]] <- i
+##       }
+    
+##     p <- pCov
+##     if( is.vector(X)) p <- 1 
+##     X <- c(X) ## {xij} = { x_{1,1},x_{2,1},..,x_{Ntot,1},x_{1,2},....,x_{Ntot,p} }
+##     mID <- ID-1
+
+##     ## The patients with labelnp = 1 (no old scans) for all repeated measures
+##     ## are treated as lack of new scans and used to estimate beta only.
+##     ## skip the computation of H2
+##     ## All patients have old scans
+    
+##     ## the labelnp of patients only with 1 (new scans) labels are replaced by all 0 (old scans)
+##     patwonew <- which(as.numeric(tapply((labelnp==0),ID,sum)==0)==1)
+##     for (i in 1 : length(patwonew)) labelnp[ID == patwonew[i]] <- 0
+    
+##     patwoNS <-  which(as.numeric(tapply((labelnp==1),ID,sum)==0)==1)
+##     if (length(patwoNS)==0) patwoNS <- -999;
+##     patwoNS <- patwoNS - 1
+    
+##     maxni <- max(tapply(rep(1,length(ID)),ID,sum))
+##     Npat <- length(unique(ID))
+
+    
+##     evalue_sigma_beta <- eigen(Sigma_beta, symmetric = TRUE, only.values = TRUE)$values
+##     if (min(evalue_sigma_beta) <= 0) stop("Sigma_beta must be positive definite!")
+##     Inv_sigma_beta <- c( solve(Sigma_beta) )
+    
+##     if (model=="para-constantRE"| model==1)
+##       {
+        
+        
+##         if (is.null(para$mu_aG )){
+##           para$mu_aG <- 0.5
+##           cat("\n mu_aG needs to be specified!! set to 0.5")
+##         }
+##         mu_aG = para$mu_aG
+        
+##         if (is.null(para$mu_rG)){
+##           para$mu_rG <- 0.5
+##           cat("\n mu_rG needs to be specified!! set to 0.5")
+##         }
+##         mu_rG = para$mu_rG
+        
+##         if (is.null(para$sd_aG) ){
+##           para$sd_aG <- 2
+##           cat("\n mu_rG needs to be specified!! set to 2")
+##         }
+##         sd_aG = para$sd_aG
+        
+##         if (is.null(para$sd_rG)) {
+##           para$sd_rG <- 2
+##           cat("\n mu_rG needs to be specified!! set to 2")
+##         }
+##         sd_rG = para$sd_rG
+        
+##         ##parametric model: gi is constant over time 
+##         labelnp <- rep(0,length(Y))    
+##         re <- .Call("Beta1",
+##                     as.numeric(Y),           ## REAL
+##                     as.numeric(X),           ## REAL
+##                     as.integer(mID),         ## INTEGER
+##                     as.integer(B),           ## INTEGER
+##                     as.integer(maxni),       ## INTEGER
+##                     as.integer(Npat),        ## INTEGER
+##                     as.numeric(labelnp),     ## REAL
+##                     as.numeric(mu_aG),
+##                     as.numeric(sd_aG),
+##                     as.numeric(mu_rG),
+##                     as.numeric(sd_rG),
+##                     as.numeric(mu_beta),     ## REAL
+##                     as.numeric(evalue_sigma_beta),  ## REAL
+##                     as.numeric(Inv_sigma_beta),  ## REAL
+##                     as.integer(burnin),      ## INTEGER
+##                     as.integer(printFreq),
+##                     package = "lmeNBBayes"
+##                     )
+        
+##         re[[3]] <- matrix(re[[3]],B,N,byrow=TRUE)
+##         re[[4]] <- matrix(re[[4]],B,p,byrow=TRUE)
+##         names(re) <- c("aG","rG","gPre","beta","AR","prp")
+##         para <- list(mu_beta = mu_beta,
+##                      Sigma_beta = Sigma_beta,
+##                      B=B,
+##                      model="para-constantRE",
+##                      burnin = burnin,
+##                      mu_aG = mu_aG,
+##                      sd_aG = sd_aG,
+##                      mu_rG = mu_rG,
+##                      sd_rG = sd_rG
+##                      )
+##         re$para <- para
+##         names(re$AR) <-c("aG", "rG", "beta")
+##         return(re)
+        
+##       }else if (model=="para"){
+##         ## // Y_ij | Gij = gij ~ NB(size=exp(X_{ij}^T beta),prob=gij)
+##         ## // gij = g1 if j is in pre-scan 
+##         ## //     = g_new if j is in old-scan 
+##         ## // g_new = Ji * g1 + (1-Ji) * g2 
+##         ## // Ji ~ ber(qG)
+##         ## // qG ~ beta(a_qG,r_qG)
+##         ## // g1, g2 ~ beta(aG,rG)
+##         ## // beta ~ rnorm(mu_beta,sigma_beta)
+##         ## // aG, rG ~ lognorm(mu_aG,sd_aG),lognorm(mu_rG,sd_rG)
+        
+        
+##         if (is.null(para$mu_aG )){
+##           para$mu_aG <- 0.5
+##           cat("\n mu_aG needs to be specified!! set to 0.5")
+##         }
+##         mu_aG = para$mu_aG
+        
+##         if (is.null(para$mu_rG)){
+##           para$mu_rG <- 0.5
+##           cat("\n mu_rG needs to be specified!! set to 0.5")
+##         }
+##         mu_rG = para$mu_rG
+        
+##         if (is.null(para$sd_aG) ){
+##           para$sd_aG <- 2
+##           cat("\n mu_rG needs to be specified!! set to 2")
+##         }
+##         sd_aG = para$sd_aG
+        
+##         if (is.null(para$sd_rG) ) {
+##           para$sd_rG <- 2
+##           cat("\n mu_rG needs to be specified!! set to 2")
+##         }
+##         sd_rG = para$sd_rG
+        
+##         re <- .Call("Beta14",
+##                     as.numeric(Y),           ## REAL
+##                     as.numeric(X),           ## REAL
+##                     as.integer(mID),         ## INTEGER
+##                     as.integer(B),           ## INTEGER
+##                     as.integer(maxni),       ## INTEGER
+##                     as.integer(Npat),        ## INTEGER
+##                     as.numeric(labelnp),     ## REAL
+##                     as.numeric(a_qG),
+##                     as.numeric(r_qG),
+##                     as.numeric(mu_aG),
+##                     as.numeric(sd_aG),
+##                     as.numeric(mu_rG),
+##                     as.numeric(sd_rG),
+##                     as.numeric(mu_beta),     ## REAL
+##                     as.numeric(evalue_sigma_beta),  ## REAL
+##                     as.numeric(Inv_sigma_beta),  ## REAL
+##                     as.integer(burnin),      ## INTEGER
+##                     as.integer(printFreq),
+##                     as.integer(patwoNS),
+##                     package = "lmeNBBayes"
+##                     )
+##         ## http://stackoverflow.com/questions/8720550/how-to-return-array-of-structs-from-call-to-c-shared-library-in-r
+##         ## for ( i in 1:4 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
+##         for ( i in 4 : 7 ) re[[i]] <- matrix(re[[i]],B,N,byrow=TRUE)
+##         re[[8]] <- matrix(re[[8]],B,p,byrow=TRUE)
+##         names(re) <- c("aG","rG","qG",
+##                        "gPre","g2s","gNew","js",
+##                        "beta","AR","prp")
+##         para <- list(mu_beta = mu_beta,
+##                      Sigma_beta = Sigma_beta,
+##                      B=B,
+##                      model="para",
+##                      burnin = burnin,
+##                      mu_aG = mu_aG,
+##                      sd_aG = sd_aG,
+##                      mu_rG = mu_rG,
+##                      sd_rG = sd_rG,
+##                      a_qG=a_qG,
+##                      r_qG=r_qG
+##                      )
+##         re$para <- para
+##         names(re$AR) <-c("aG", "rG", "beta")
+##         return(re)
+        
+        
+##       }else if (model=="para-unif"){
+##         if (is.null(para$max_aG) )  para$max_aG <- 30
+##         max_aG <- para$max_aG
+##         ## // Y_ij | Gij = gij ~ NB(size=exp(X_{ij}^T beta),prob=gij)
+##         ## // gij = g1 if j is in pre-scan 
+##         ## //     = g_new if j is in old-scan 
+##         ## // g_new = Ji * g1 + (1-Ji) * g2 
+##         ## // Ji ~ ber(qG)
+##         ## // qG ~ beta(a_qG,r_qG)
+##         ## // g1, g2 ~ beta(aG,rG)
+##         ## // beta ~ rnorm(mu_beta,sigma_beta)
+##         ## // aG, rG ~ unif(0,max_aG)
+
+##         re <- .Call("Beta14Unif",
+##                     as.numeric(Y),           ## REAL
+##                     as.numeric(X),           ## REAL
+##                     as.integer(mID),         ## INTEGER
+##                     as.integer(B),           ## INTEGER
+##                     as.integer(maxni),       ## INTEGER
+##                     as.integer(Npat),        ## INTEGER
+##                     as.numeric(labelnp),     ## REAL
+##                     as.numeric(a_qG),
+##                     as.numeric(r_qG),
+##                     as.numeric(max_aG),
+##                     ## as.numeric(mu_aG),
+##                     ## as.numeric(sd_aG),
+##                     ## as.numeric(mu_rG),
+##                     ## as.numeric(sd_rG),
+##                     as.numeric(mu_beta),     ## REAL
+##                     as.numeric(evalue_sigma_beta),  ## REAL
+##                     as.numeric(Inv_sigma_beta),  ## REAL
+##                     as.integer(burnin),      ## INTEGER
+##                     as.integer(printFreq),
+##                     as.integer(patwoNS),
+##                     package = "lmeNBBayes"
+##                     )
+##         ## http://stackoverflow.com/questions/8720550/how-to-return-array-of-structs-from-call-to-c-shared-library-in-r
+##         ## for ( i in 1:4 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
+##         for ( i in 5 : 8 ) re[[i]] <- matrix(re[[i]],B,N,byrow=TRUE)
+##         re[[9]] <- matrix(re[[9]],B,p,byrow=TRUE)
+##         names(re) <- c("aG","rG","qG","logL",
+##                        "gPre","g2s","gNew","js",
+##                        "beta","AR","prp")
+##         para <- list(mu_beta = mu_beta,
+##                      Sigma_beta = Sigma_beta,
+##                      B=B,
+##                      model="para",
+##                      burnin = burnin,
+##                      max_aG = max_aG,
+##                      ## mu_aG = mu_aG,
+##                      ## sd_aG = sd_aG,
+##                      ## mu_rG = mu_rG,
+##                      ## sd_rG = sd_rG,
+##                      a_qG=a_qG,
+##                      r_qG=r_qG
+##                      )
+##         re$para <- para
+##         names(re$AR) <-c("aG", "rG", "beta")
+##         return(re)
+##       }else if (model== "nonpara" | model==8){
+
+##         ## nonparametric model
+##         ## // Y_ij | Gij = gij ~ NB(size=exp(X_{ij}^T beta),prob=gij)
+##         ## // gij = g1 if j is in pre-scan 
+##         ## //     = g_new if j is in old-scan 
+##         ## // g_new = Ji * g1 + (1-Ji) * g2 
+##         ## // Ji ~ ber(qG)
+##         ## // qG ~ beta(a_qG,r_qG)
+##         ## // g1, g2 ~ sum_{h=1}^M pi_h beta(aG_h,rG_h)
+##         ## // beta ~ mvrnorm(mu_beta,sigma_beta)
+##         ## // aG ~lognorm(mu_aG,sd_aG)
+##         ## // rG ~ lognorm(mu_rG,sd_rG)
+##         ##  nonparametric model,
+        
+        
+##         if (is.null(para$mu_aG )){
+##           para$mu_aG <- 0.5
+##           cat("\n mu_aG needs to be specified!! set to 0.5")
+##         }
+##         mu_aG = para$mu_aG
+        
+##         if (is.null(para$mu_rG)){
+##           para$mu_rG <- 0.5
+##           cat("\n mu_rG needs to be specified!! set to 0.5")
+##         }
+##         mu_rG = para$mu_rG
+        
+##         if (is.null(para$sd_aG) ){
+##           para$sd_aG <- 2
+##           cat("\n mu_rG needs to be specified!! set to 2")
+##         }
+##         sd_aG = para$sd_aG
+        
+##         if (is.null(para$sd_rG) ) {
+##           para$sd_rG <- 2
+##           cat("\n mu_rG needs to be specified!! set to 2")
+##         }
+##         sd_rG = para$sd_rG
+##         if (is.null(para$r_D) ){
+##           cat("\n r_D needs to be specified!! set to 1")
+##           para$r_D <- 1
+##         }
+##         r_D = para$r_D
+##         re <- .Call("Beta24",
+##                     as.numeric(Y),           ## REAL
+##                     as.numeric(X),           ## REAL
+##                     as.integer(mID),         ## INTEGER
+##                     as.integer(B),           ## INTEGER
+##                     as.integer(maxni),       ## INTEGER
+##                     as.integer(Npat),        ## INTEGER
+##                     as.integer(M),           ## INTEGER
+##                     as.numeric(labelnp),     ## REAL
+##                     as.numeric(a_qG),        ## REAL
+##                     as.numeric(r_qG),        ## REAL
+##                     as.numeric(mu_aG),       ## REAL
+##                     as.numeric(sd_aG),       ## REAL
+##                     as.numeric(mu_rG),       ## REAL
+##                     as.numeric(sd_rG),       ## REAL
+##                     as.numeric(mu_beta),     ## REAL
+##                     as.numeric(evalue_sigma_beta),  ## REAL
+##                     as.numeric(Inv_sigma_beta),  ## REAL
+##                     as.numeric(a_D),         ## REAL
+##                     as.numeric(r_D),         ## REAL
+##                     as.integer(burnin),      ## INTEGER
+##                     as.integer(printFreq),
+##                     as.integer(patwoNS),
+##                     package = "lmeNBBayes"
+##                     )
+##         for ( i in 3 : 8 ) re[[i]] <- matrix(re[[i]],B,N,byrow=TRUE)
+##         for ( i in 9 : 12 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
+##         re[[13]] <- matrix(re[[13]],B,p,byrow=TRUE)
+##         names(re) <- c("qG","D",
+##                        "gPre","g2s","gNew","js","h1s","h2s",
+##                        "weightH1","vs","aGs","rGs",
+##                        "beta","AR","prp")
+##         re$para <- list(
+##                         burnin = burnin,
+##                         M=M,
+##                         B=B,
+##                         model=model,
+##                         Npat=N,
+##                         Ntot=length(Y),
+##                         para
+##                         )
+##         names(re$AR) <- names(re$prp) <- c(paste("aG",1:M,sep=""),
+##                                            paste("rG",1:M,sep=""),
+##                                            paste("beta",sep="")
+##                                            )
+##         re$h1s <- re$h1s + 1
+##         re$h2s <- re$h2s + 1
+##         re$MeanWH <- colMeans(re$weightH1);
+##         names(re$MeanWH) <- paste("cluster",1:M)
+##         return(re)
+        
+##       }else if (model=="nonpara-unif"){
+        
+##         ## nonparametric model D: is fixed
+##         ## // Y_ij | Gij = gij ~ NB(size=exp(X_{ij}^T beta),prob=gij)
+##         ## // gij = g1 if j is in pre-scan 
+##         ## //     = g_new if j is in old-scan 
+##         ## // g_new = Ji * g1 + (1-Ji) * g2 
+##         ## // Ji ~ ber(qG)
+##         ## // qG ~ beta(a_qG,r_qG)
+##         ## // g1, g2 ~ sum_{h=1}^M pi_h beta(aG_h,rG_h)
+##         ## // beta ~ mvrnorm(mu_beta,sigma_beta)
+##         ## // aG,rG ~ unif(0.0001,max_aG)
+##         ##  nonparametric model,
+##         if (is.null(para$max_aG) )  para$max_aG <- 30
+##         max_aG <- para$max_aG
+
+##         if (is.null(para$max_D))  para$max_D <- 5
+##         maxD <- para$max_D 
+
+##         if (is.null(initBeta)) initBeta <- rep(0, pCov)
+##         if (is.null(M)) M  <- 10 ## Need to fix this 
+        
+##         re <- .Call("Beta24Unif",
+##                     as.numeric(Y),           ## REAL
+##                     as.numeric(X),           ## REAL
+##                     as.integer(mID),         ## INTEGER
+##                     as.integer(B),           ## INTEGER
+##                     as.integer(maxni),       ## INTEGER
+##                     as.integer(Npat),        ## INTEGER
+##                     as.integer(M),           ## INTEGER
+##                     as.numeric(labelnp),     ## REAL
+##                     as.numeric(a_qG),        ## REAL
+##                     as.numeric(r_qG),        ## REAL
+##                     as.numeric(max_aG),
+##                     ## as.numeric(mu_aG),    ## REAL
+##                     ## as.numeric(sd_aG),    ## REAL
+##                     ## as.numeric(mu_rG),    ## REAL
+##                     ## as.numeric(sd_rG),    ## REAL
+##                     as.numeric(mu_beta),     ## REAL
+##                     as.numeric(evalue_sigma_beta),  ## REAL
+##                     as.numeric(Inv_sigma_beta),  ## REAL
+##                     as.numeric(maxD),         ## REAL
+##                     ## as.numeric(r_D),         ## REAL
+##                     as.integer(burnin),      ## INTEGER
+##                     as.integer(printFreq),
+##                     as.integer(patwoNS),
+##                     as.numeric(initBeta),
+##                     package = "lmeNBBayes"
+##                     )
+##         for ( i in 4 : 9 ) re[[i]] <- matrix(re[[i]],B,N,byrow=TRUE)
+##         for ( i in 10 : 13 ) re[[i]] <- matrix(re[[i]],B,M,byrow=TRUE)
+##         re[[14]] <- matrix(re[[14]],B,p,byrow=TRUE)
+##         names(re) <- c("qG","D","logL",
+##                        "gPre","g2s","gNew","js","h1s","h2s",
+##                        "weightH1","vs","aGs","rGs",
+##                        "beta","AR","prp")
+        
+##         para$mu_aG <- para$mu_rG <- para$sd_aG <- para$sd_rG <- para$a_D <- para$r_D <- NULL
+        
+##         re$para <- list(
+##                         burnin = burnin,
+##                         M=M,
+##                         B=B,
+##                         model=model,
+##                         Npat=N,
+##                         Ntot=length(Y),
+##                         a_qG=a_qG,
+##                         r_qG=r_qG,
+##                         max_aG=max_aG,
+##                         mu_beta=mu_beta,
+##                         Sigma_beta=Sigma_beta,
+##                         maxD=maxD
+##                         )
+##         names(re$AR) <- names(re$prp) <- c(paste("aG",1:M,sep=""),
+##                                            paste("rG",1:M,sep=""),
+##                                            paste("beta",sep=""),
+##                                            "D"
+##                                            )
+##         re$h1s <- re$h1s + 1
+##         re$h2s <- re$h2s + 1
+##         re$MeanWH <- colMeans(re$weightH1);
+##         names(re$MeanWH) <- paste("cluster",1:M)
+##         return(re)
+
+##       }
+##   }
+
+
+
+## DevRatio <- function(gPre,gNew) ## gPre, gNew must be a matrix of length(useSample) by N
+##   {
+##     ## The deviation of CEL counts of single patient i from overall cohort at week j could be measured by:
+##     ## R_ij=E(Y_ij|G_ij)/E(Y_ij)= r_ij (1-g_ij)/gij * 1/(rij*(mu_{1/G}-1)) = (1-g_ij)/(gij*(mu_{1/G}-1))
+##     ## The change in the deviation R_ij at two time point could be measured by
+##     ## R_ij/R_ij' = (1-g_ij)/(gij*(mu_{1/G}-1))*(gij'*(mu_{1/G}-1))/(1-g_ij) = g_ij'*(1-g_ij)/(g_ij*(1-g_ij'))
+##     ## Hence the deviation ratio between the pre scan period and new scan period is:
+##     ## R_inew/R_ipre
+##     ## How much patient i increases the deviation from the overall trend between the pre-scan period and new-scan period
+
+##     ## the elemnt-wise operations
+##     m1G_1 <- mean(c(1/gPre,1/gNew)) - 1
+    
+##     EYGpre <- 1/gPre - 1
+##     EYGnew <- 1/gNew - 1
+
+
+##     CI95_EYGpre <- apply(EYGpre,2,quantile,prob=c(0.5,0.025,0.975)) / m1G_1
+##     CI95_EYGnew <- apply(EYGnew,2,quantile,prob=c(0.5,0.025,0.975)) / m1G_1
+
+##     CI95_EYGpre[1,] <- colMeans(EYGpre)
+##     CI95_EYGnew[1,] <- colMeans(EYGnew)
+    
+##     ##DevMat <- EYGnew/EYGpre ## B-Bburn by N
+##     ##CI95 <- apply(DevMat,2,quantile,prob=c(0.5,0.025,0.975))
+
+##     NewPre <-  CI95_EYGnew[1,]/CI95_EYGpre[1,]
+    
+##     ##CI95[1,] <- colMeans(DevMat)
+    
+##     ##rownames(CI95)[1] <- "mean"
+##     rownames(CI95_EYGpre)[1] <- "mean"
+##     rownames(CI95_EYGnew)[1] <- "mean"
+##     if (!is.null(rownames(gPre)))
+##       {
+##         names(CI95) <- colnames(gPre)
+##         colnames(CI95_EYGpre) <- colnames(gPre)
+##         colnames(CI95_EYGnew) <- colnames(gPre)
+##       }
+##     re <- list(Ratio=NewPre,
+##                Rpre=CI95_EYGpre,
+##                Rnew=CI95_EYGnew)
+    
+##     return (re)
+##   }
+
+
+## test <- function(x,mu,Sigma)
+##   {
+##     InvSigma <- solve(Sigma)
+##     evalue <- eigen(Sigma, symmetric = TRUE, only.values = TRUE)$values
+##     .Call("tempFun",
+##           as.numeric(x),
+##           as.numeric(mu),
+##           as.integer(length(mu)),
+##           as.numeric(evalue),
+##           as.numeric(c(InvSigma)),
+##           package ="lmeNBBayes")
+##   }
+## infoPriorTrt <- function(info.mean,info.var,p0s,add=0)
+##   {
+##     ## develop Informative prior under the random sample assumption
+
+##     ## p0s = c(Pr(plcb),Pr(trt))
+##     ## Save parameters
+##     input <- list(info.mean=info.mean,info.var=info.var,p0s=p0s,add=add)
+##     ## The number of 3-month interval during the followup
+##     Nint <- 3
+##     ## info.mean is a vector of length 1 + Nint*2 containing
+##     ## (Intercept) trt010:timeInt1 trt011:timeInt1 trt010:timeInt2 trt011:timeInt2 trt010:timeInt3 trt011:timeInt3
+##     ##  alpha       beta_plcb,1     beta_trt,1     beta_plcb,2      beta_trt,2 ,....
+##     ## which column of info.var corresponds to coefficients of placebo patients
+##     which.plcb <- c(2,4,6)
+##     which.trt <- which.plcb + 1
+##     ## the first entry of info.mean is intercept coefficient (alpha)
+##     m.alpha <- info.mean[1]
+##     m.betas.plcb <- info.mean[which.plcb]
+##     m.betas.trt <- info.mean[which.trt]
+##     m.beta01 <- rep(NA,Nint+1)
+
+##     ## The mean of the intercept term does not change
+##     m.tild.beta01[1] <- info.mean[1]
+##     s.tild.beta01 <- matrix(NA,Nint+1,Nint+1) ## + 1 for alpha (intercept)
+##     ## The variance of the intercept term does not change
+##     s.tild.beta01[1,1] <- info.var[1,1]
+    
+##     for (itime1 in 1 : Nint)
+##       {
+##         m.bet0 <- m.betas.plcb[itime1]
+##         m.bet1 <- m.betas.trt[itime1]
+##         ## Extract the index to pick
+##         which.pt <- c(which.plcb[itime1],which.trt[itime1])
+##         Sigma <- info.var[which.pt, which.pt]
+##         mt <- moments.tildeBeta(mu=c(m.bet0,m.bet1),Sigma=Sigma,p0=p0s)
+##         m.tild.beta01[itime1+1] <- mt[1] ## mean tilde.beta[itime1]
+##         s.tild.beta01[itime1+1,itime1+1] <- mt[3] ## var(tilde.beta)
+##         ## Compute the covariance between tilde.beta and alpha
+##         mt <- moments.tildeBeta(mu=c(m.bet0,m.bet1,m.alpha),
+##                                 Sigma=info.var[c(which.pt,1), c(which.pt,1)], 
+##                                 p0=p0s)
+##         s.tild.beta01[1,itime1+1] <- s.tild.beta01[itime1+1,1] <- mt - m.tild.beta01[1]*m.tild.beta01[itime1 + 1]
+##         if (itime1 > 1){
+##           for (itime2 in 1 : (itime1-1)){
+##             m.bet0.2 <- m.betas.plcb[itime2]
+##             m.bet1.2 <- m.betas.trt[itime2]
+##             which.pt2 <- c(which.plcb[itime2],which.trt[itime2])
+##             Sigma <- info.var[c(which.pt,which.pt2), c(which.pt,which.pt2)]
+##             mt <- moments.tildeBeta(mu=c(m.bet0,m.bet1,m.bet0.2,m.bet1.2),Sigma=Sigma,p0=p0s) 
+##             s.tild.beta01[itime1+1,itime2+1] <- s.tild.beta01[itime2+1,itime1+1] <- mt - m.tild.beta01[itime1]*m.tild.beta01[itime2]
+##           }
+##         }
+##       }
+##     print("info.var before any truncation")
+##     print(s.tild.beta01)
+##     re <- adjustPosDef(mat=s.tild.beta01,add=add)
+##     info.var <- re$adjust.mat;
+##     colnames(info.var) <-  rownames(info.var) <- colnames(s.tild.beta01) <- rownames( s.tild.beta01) <- names(m.tild.beta01) <- c("alpha (intercept)",paste("tildeBeta",1:Nint,sep=""))
+    
+##     print(paste("eigenvalue of the informative prior variance"))
+##     print(eigen(info.var))
+##     print(paste("correlation matrix of the informative prior variance"))
+##     print(cov2cor(info.var))
+    
+##     return(list(info.mean.trt=m.tild.beta01,info.var.trt=info.var,
+##                 para=list(input,orig.var=s.tild.beta01),note=re$note))
+##   }
+
+
+## moments.tildeBeta <- function(mu,Sigma,p0s){
+##   ## mu = c(mu_{beta_{plcb,t}} mu_{beta_{trt,t}})
+##   ## p0s = c( Pr(plcb), Pr(trt) ) 2 by 1
+##   ## Sigma = Var(c(beta_{plcb,t},beta_{trt,t})) 2 by 2
+##   Ndim <- length(mu)
+ 
+##   if (length(p0s)==1) p0s[2] <- 1 - p0s[1]
+##   else if( sum(p0s)!=1 ) stop("Pr(placebo) + Pr(TRT) must be 1")
+##   if (length(p0s)!=2) stop("The length of p0s must be 2, each containing the pr(placebo), pr(trt)")
+  
+##   if (dim(Sigma)[1]!=Ndim || dim(Sigma)[2]!=Ndim)
+##     stop("The dimension of Sigma does not much with the length of mu")
+  
+##   evalue_sigma <- eigen(Sigma, symmetric = TRUE, only.values = TRUE)$values
+##   if (min(evalue_sigma) <= 0) stop("Sigma_beta must be positive definite!")
+##   Inv_sigma <- c( solve(Sigma) )
+  
+##   if (Ndim==2){
+##     ## Compute E(beta.tilde) = int int log(exp(a0)*pi0 + exp(a1)*pi1)*f(a0,a1) da0 da1 where f(x,y) = joint pdf of (mu.beta_{0,t},mu.beta_{1,t})
+##     re <- .Call("EYP1or2",
+##                 as.numeric(mu), as.numeric(evalue_sigma),
+##                 as.numeric(Inv_sigma),
+##                 as.numeric(p0s),
+##                 package ="lmeNBBayes")[[1]]
+##     re[3] <- re[2] - re[1]^2 ## Variance
+##     names(re) <-c("E( log[exp(X1)P1+exp(X2)P2] )","E( log[exp(X1)P1+exp(X2)P2]^2 )","Var(log[exp(X1)P1+exp(X2)P2])")
+    
+##   }else if (Ndim %in% 3:4){
+##     ## If ndim==4 compute E{ log(exp(X1)Pr(A1)+exp(X2)Pr(A2))*log(exp(X1')Pr(A1)+exp(X2')Pr(A2)) }
+##     ## mu[1] = placebo beta at time interval k
+##     ## mu[2] = trt beta at time interval k
+##     ## mu[3] = placebo beta at time interval k'
+##     ## mu[4] = trt beta at time interval k'
+
+##     ## If ndim==3 compute E{ X1*log(exp(X1')Pr(A1)+exp(X2')Pr(A2)) }
+##     ## mu[1:2] = c(E(beta.t.0), E(beta.t.1))
+##     ## mu[3] = E(alpha),
+##     ## Sigma[1:2,1:2]= Var(c(beta.t.0,beta.t.1)), Sigma[3,3] = Var(alpha) 
+  
+##     re <- .Call("EYPEXP",
+##                 as.numeric(mu), as.numeric(evalue_sigma),
+##                 as.numeric(Inv_sigma),
+##                 as.numeric(p0s),
+##                 as.integer(Ndim),
+##                 package ="lmeNBBayes")[[1]]
+##    if (Ndim == 4) names(re) <- "E( log[exp(X1)P1+exp(X2)P2]*log[exp(X1')P1+exp(X2')P2] )"
+##    else if (Ndim == 3) names(re) <- "E( alpha*log[exp(X1')P1+exp(X2')P2] )"
+##   }
+##   return(re)
+## }
+
+
+
+## momentsBeta <- function(aG1,rG1,beta)
+##   {
+##     ## Y ~ NB(size=rij,prob=G)
+##     ## G ~ Beta(aG1,rG1)
+##     ## E(1/G) = ...some calculations... = (aG+rG-1)/(aG-1)
+##     ## E(Y)=exp(beta0)*(mu_{1/G}+1)=exp(1)*((aG1+rG1-1)/(aG1-1)+1)
+##     ## Var(1/G) = E(1/G^2) - E(1/G)^2 = (aG1+rG1-1)/(aG1-1)*( (aG1+rG1-2)/(aG1-2) - (aG1+rG1-1)/(aG1-1) ) = 0.06559506
+##     ## Var(Y) = rij*Var(1/G)*(rij+1) + rij*E(1/G)*(E(1/G)-1)
+##     ## calculate E(Y), Var(Y), E(1/G), and E(1/G^2) at initial time
+##     rij <- exp(beta) ## value of size parmeter at time zero
+##     E1G <- (aG1+rG1-1)/(aG1-1)
+##     V1G <- (aG1+rG1-1)/(aG1-1)*( (aG1+rG1-2)/(aG1-2) - (aG1+rG1-1)/(aG1-1) )
+##     EY <- rij*(E1G-1)
+##     VY <- rij*V1G*(rij+1)+rij*E1G*(E1G-1)
+##     return (c(EY=EY,SDY=sqrt(VY),
+##               E1G=E1G,V1G=V1G))
+##   }
+
+
+## momentsGL <- function(EG,VG,beta)
+##   {
+##     ## Y ~ NB(size=rij,prob=1/(G+1))
+##     ## G ~ dist(mean=EG,var=VG)
+##     rij <- exp(beta)
+##     ## E(Y|G) = rij*G
+##     ## Var(Y|G) = rij*G*(G+1)
+##     ## E(Y)=E(E(Y|G))=rij*E(G)
+##     EY <- rij*EG
+##     ## Var(Y) = Var(E(Y|G)) + E(Var(Y|G))
+##     ##        = Var(rij*G) + E(G*(G+1)*rij)
+##     ##        = rij^2*Var(G) + rij*(E(G^2)+E(G))
+##     ##        = rij^2*Var(G) + rij*(Var(G)+E(G)^2+E(G))
+##     VY <- rij^2*VG + rij*(VG+EG^2+EG)
+##     return (c(EY=EY,SDY=sqrt(VY),
+##               EG=EG,VG=VG))
+##   }
+
+## paralnorm <- function(E,V=15^2){
+##   ## E: expectation of log-normally distributed r.v.
+##   ## V: variance of log-normally distributed r.v
+
+##   sd <- sqrt(log(V/E+1))
+##   mu <- log(E)-sd/2
+##   return(list(mu=mu,sd=sd))
+## }
+## F_inv_gam <- function(p,sp1,sc1,sp2,sc2,pi)
+##   {
+##     G = function (t)
+##       pi*pgamma(t,shape=sp1,scale=sc1)+(1-pi)*pgamma(t,shape=sp2,scale=sc2) - p
+##                 return(uniroot(G,c(0,100))$root)
+##   }
+
+## getSample <- function(
+##                       iseed = 911,
+##                       rev = 4,
+##                       dist = "b",
+##                       mod = 0,
+##                       probs = seq(0,0.99,0.01),
+##                       ts = seq(0.001,0.99,0.001),
+##                       full = FALSE
+##                       )
+##   {
+##     ## mod = 0: generate sample
+##     ## mod = 1: quantiles of the true populations
+##     ## mod = 2: densities of the true populations
+##     ## mod = 3: parameters of the simulation model
+##     ## mod = 4: parameters for uninformative prior
+
+##     ## dist = "b","b2","g" 
+
+##     ## if full = TRUE then full dataset is returned and rev is ignored
+##     ni <- 11
+##     Npat <- 180; ## upto review 4, Npat=160 in total this number must be divisible by NpatEnterPerMonth
+##     NpatEnterPerMonth <- 15
+##     DSMBVisitInterval <- 4 ## months
+    
+##     varInfoP <- c(0.1,0.01)
+##     ## === necessary for mod= 0, 3 and mod = 4
+##     ## d contains a full dataset
+##     days <- NULL
+##     for (ipatGroup in 1 : (Npat/NpatEnterPerMonth))
+##       {
+##         ScandaysForSingleGroup <- ipatGroup:(ipatGroup+ni-1)
+##         days <- c(days,rep(ScandaysForSingleGroup,NpatEnterPerMonth))
+##       }
+
+##     set.seed(iseed)
+##     if (dist=="g") ## need to went through by all mod=0,...,4
+##       {
+##         ## r.e. mixture of two gamma distributions
+##         pi <- 0.7
+##         sp1 <- 0.3; sc1 <- 0.5
+##         sp2 <- 4; sc2 <- 0.8
+##         beta0 <- 0.5
+##         beta1 <- 0
+##         hs <- sample(1:2,Npat,c(pi,1-pi),replace=TRUE)
+##         Npat_dist1 <- sum(hs==1)
+##         Npat_dist2 <- sum(hs==2)
+
+##         gsBASE <- rep(NA,Npat)
+##         gsBASE[hs==1] <- rgamma(Npat_dist1,shape=sp1,scale=sc1)
+##         gsBASE[hs==2] <- rgamma(Npat_dist2,shape=sp2,scale=sc2)
+##         gsBASE <- 1/(1+gsBASE)
+        
+##         if (mod==1)
+##           {
+##             lq <- length(probs);
+##             quan <- rep(NA,lq);
+##             for (i in 1 : lq) quan[i] <- F_inv_gam(p=probs[i],sp1=sp1,sc1=sc1,sp2=sp2,sc2=sc2,pi=pi)
+##             quan = sort(1/(1+quan))
+            
+##             return (rbind(probs=probs,quantile=quan))
+
+##           }else if (mod == 2){
+            
+##             ts.trans <-1/ts-1
+##             return ((pi*dgamma(ts.trans,shape=sp1,scale=sc1)+(1-pi)*dgamma(ts.trans,shape=sp2,scale=sc2) )*(1/ts^2))
+            
+##           }else if (mod == 3){
+            
+##             c1 <- momentsGL(EG=sp1*sc1,VG=sp1*sc1^2,beta=beta0) ## expectation and variance of Y
+##             c2 <- momentsGL(EG=sp2*sc2,VG=sp2*sc2^2,beta=beta0)
+            
+##             outputMod3 <- list(infoPara = list(mu_beta=c(beta0,beta1),
+##                                  Sigma_beta=diag(varInfoP),a_qG=100,r_qG=1),
+##                                beta0=beta0,beta1=beta1,K=2,
+##                                scales=c(sc1=sc1,sc2=sc2),
+##                                shapes=c(sp1=sp1,sp2=sp2),
+##                                c1=c1,c2=c2
+##                                )
+##           }
+##       }else if (dist == "b"){
+       
+##         beta0 <- 1
+##         beta1 <- -0.05
+##         aG1 <- 3
+##         rG1 <- 0.8
+        
+##         gsBASE <- rbeta(Npat,aG1,rG1)
+##         hs <- rep(1,Npat)
+##         if (mod==1){
+##           return( 
+##                  rbind(probs=probs,
+##                        quantile=qbeta(probs,shape1=aG1,shape2=rG1)
+##                        )
+##                  )
+##         }else if (mod==2){
+          
+##           return (dbeta(ts,shape1=aG1,shape2=rG1))
+          
+##         }else if (mod == 3){
+          
+##           c1 <- momentsBeta(aG1,rG1,beta0)
+##           outputMod3 <- list(infoPara = list(mu_beta=c(beta0,beta1),
+##                                Sigma_beta=diag(varInfoP),
+##                                max_aG=30
+##                                ),##a_qG=10,r_qG=1),
+##                              beta0=beta0,beta1=beta1,K=1,c1=c1, aGs=c(aG1=aG1),
+##                              rGs=c(rG1=rG1))
+##         }
+
+##       }else if (dist == "b2")
+##         {
+##         ## mixture of two beta distributions
+##         ## cluster 1: E(Y)=exp(beta0)*mu_G=exp(2)*((aG1+rG1-1)/(aG1-1)+1)=3.098636 ## at initial time
+##         ## cluster 2: E(Y)=exp(beta0)*mu_G=exp(2)*((aG2+rG2-1)/(aG2-1)+1)=7.037196 ## at initial time
+##         pi <- 0.3
+        
+##         beta0 <- 1.5
+##         beta1 <- -0.05
+        
+##         aG1 <- 10
+##         rG1 <- 10
+##         aG2 <- 20
+##         rG2 <- 1
+
+##         ## generate the initial random effect values of everyone
+##         hs <- sample(1:2,Npat,c(pi,1-pi),replace=TRUE)
+##         Npat_dist1 <- sum(hs==1)
+##         Npat_dist2 <- sum(hs==2)
+        
+##         gsBASE <- rep(NA,Npat)
+##         gsBASE[hs==1] <- rbeta(Npat_dist1,aG1,rG1);
+##         gsBASE[hs==2] <- rbeta(Npat_dist2,aG2,rG2);
+##         if (mod==1){
+##           F_inv_beta2 <- function(p,aG1,rG1,aG2,rG2,pi)
+##             {
+##               G = function (t) pi*pbeta(t,shape1=aG1,shape2=rG1)+(1-pi)*pbeta(t,shape1=aG2,shape2=rG2) - p
+##               return(uniroot(G,c(0,1000))$root)
+##             }
+##           lq <- length(probs);
+##           quant <- rep(NA,lq);
+##           for (i in 1 : lq) quant[i] <- F_inv_beta2(p=probs[i],aG1,rG1,aG2,rG2,pi=pi)
+##           return (rbind(probs=probs,quantile=quant))
+##         }
+##         else if (mod==2){
+
+##           return ((pi*dbeta(ts,shape1=aG1,shape2=rG1)+(1-pi)*dbeta(ts,shape1=aG2,shape2=rG2)) )
+##         }else if (mod == 3){
+
+##           c1 <- momentsBeta(aG1,rG1,beta0)
+##           c2 <- momentsBeta(aG2,rG2,beta0)
+##           outputMod3 <-  list(infoPara = list(mu_beta=c(beta0,beta1),
+##                                 Sigma_beta=diag(varInfoP),max_aG=30),
+##                               beta0=beta0,beta1=beta1,K=2,c1=c1,c2=c2,
+##                               aGs=c(aG1=aG1,aG2=aG2),
+##                               rGs=c(rG1=rG1,rG2=rG2),
+##                               pi=pi
+##                               )
+##         }
+##       }
+##     if ( dist == "YZ")
+##       {
+##         pi <- 0.85
+
+##         alpha <- exp(-0.5)
+##         ## logalpha <- -0.5
+##         beta0 <- 0.905 ##0.405+0.5 beta - logalpha
+##         beta1 <- 0
+##         ## a bimodal distribution with 85 % of Gi from a gamma distribution with mean 0.647 and variance 2.374
+##         scale <- 2.374/0.647*alpha 
+##         shape <- 0.647^2/2.374
+##         mu <- 3*alpha
+##         sd <- sqrt(0.25)*alpha
+       
+##         ## generate the initial random effect values of everyone
+##         hs <- sample(1:2,Npat,c(pi,1-pi),replace=TRUE)
+##         Npat_dist1 <- sum(hs==1)
+##         Npat_dist2 <- sum(hs==2)
+        
+##         gsBASE <- rep(NA,Npat)
+##         gsBASE[hs==1] <- rgamma(Npat_dist1,shape=shape,scale=scale);
+##         gsBASE[hs==2] <- rnorm(Npat_dist2,mean=mu,sd=sd);
+##         gsBASE[gsBASE < 0 ] <- 0
+##         gsBASE <- 1/(1+gsBASE)
+        
+##         if (mod==1)
+##           {
+##             return (NULL)
+
+##           }else if (mod == 2){
+            
+##             ts.trans <-1/ts-1
+##             return ((pi*dgamma(ts.trans,shape=shape,scale=scale)+(1-pi)*dnorm(ts.trans,mean=mu,sd=sd) )*(1/ts^2))
+            
+##           }else if (mod == 3){
+           
+##             outputMod3 <- list(infoPara = list(mu_beta=c(beta0,beta1),
+##                                  Sigma_beta=diag(varInfoP),max_aG=30),
+##                                beta0=beta0,beta1=beta1,scale=scale,shape=shape,mu=mu,sd=sd,pi=pi,K=2
+##                                )
+##           }
+##       }
+      
+##     ## generate samples for dist = "b","b3", "g", and "l" (except "b2")
+##     Y <- NULL
+##     timecov <- c(0,0,(1:(ni-2)))
+##     for ( ipat in 1 : Npat)
+##       {
+##         ## the number of repeated measures are the same
+##         ## we assume that the time effects occurs once after the treatments are in effect
+##         got <- rnbinom(ni,size = exp(beta0+beta1*timecov), prob = gsBASE[ipat])         
+##         Y <- c(Y,got)
+##       }
+##     ##cat("beta0",beta0,"\n")
+##     d <- data.frame(Y=Y,
+##                     X1=rep(1,Npat*ni),
+##                     X2=rep(timecov,Npat),
+##                     ID=rep(1:Npat,each=ni),
+##                     gsBASE = rep(gsBASE,each=ni),
+##                     scan = rep(1:ni,Npat),
+##                     ## day contains the day when the scan was taken
+##                     ## 10 patients enter a trial every month
+##                     days = days,
+##                     hs = rep(hs,each=ni)
+##                     )
+
+##     ## dSMB visit is assumed to be every 4 months
+##     if (full) return (d) 
+##     d <- subset(d,subset= days <= DSMBVisitInterval*rev)
+##     d$labelnp <- rep(0,nrow(d))
+##     d$labelnp[ DSMBVisitInterval*(rev-1) < d$days ] <- 1
+##     ## The first two scans (screening and base-line scans are treated as pre-scans)
+##     d$labelnp[ d$X2==0 ] <- 0
+
+##     if (dist=="b2")
+##       {
+##         temp <- index.b.each(Y=d$Y,ID=d$ID,labelnp=d$labelnp,X=cbind(d$X1,d$X2),
+##                              betas=c(beta0,beta1),aGs=c(aG1,aG2),rGs=c(rG1,rG2),pis=c(pi,1-pi))
+##         d$probIndex <- c(temp,rep(NA,nrow(d)-length(temp) ))
+##       }else if (dist=="b")
+##         {
+##           temp <- index.b.each(Y=d$Y,ID=d$ID,labelnp=d$labelnp,X=cbind(d$X1,d$X2),
+##                                betas=c(beta0,beta1),aGs=c(aG1),rGs=c(rG1),pis=c(1))
+##           d$probIndex <- c(temp,rep(NA,nrow(d)-length(temp)) )
+##         }else if (dist=="g"){
+
+##           temp <- index.gammas(Y=d$Y,ID=d$ID,labelnp=d$labelnp,X=cbind(d$X1,d$X2),
+##                               betas=c(beta0,beta1),
+##                               shapes=c(sc1,sc2), ## shape
+##                               scales=c(sp1,sp2), ## scale
+##                               pis=c(pi,1-pi))
+##           d$probIndex <- c(temp,rep(NA,nrow(d)-length(temp)) )
+##         }else if (dist == "YZ"){
+          
+##           temp <- index.YZ(Y=d$Y,ID=d$ID,labelnp=d$labelnp,X=cbind(d$X1,d$X2),
+##                            betas=c(beta0,beta1),
+##                            shape=shape, ## shape
+##                            scale=scale, ## scale
+##                            mu=mu,
+##                            sd=sd,
+##                            pi=pi)
+##           d$probIndex <- c(temp,rep(NA,nrow(d)-length(temp)) )
+            
+##           }
+
+##     if (mod==0) return(d)
+    
+##     Npat <- length(unique(d$ID))
+##     maxDs <- seq(0.01,5,0.01); Ktilde <- 2
+##     ekn <- E.KN(maxDs=maxDs,N=Npat)
+##     ib_D <- maxDs[min(which(ekn >= Ktilde))]
+##     a_D <- 0.0001
+##     if (mod==3){
+
+##       outputMod3$infoPara$ib_D <- ib_D
+##       outputMod3$infoPara$a_D <- a_D
+##       ##outputMod3$infoPara$maxD <- 5
+##       return(outputMod3)
+
+##     }else if (mod == 4){
+      
+##       mu_beta <- rep(0,irev)
+##       Sigma_beta <- diag(rep(5,irev))
+      
+##       outputMod4 <- list(
+##                          mu_beta=mu_beta,Sigma_beta=Sigma_beta,
+##                          ##a_qG=a_qG,r_qG=r_qG,
+##                          a_D = a_D, ib_D=ib_D,
+##                          ##maxD=5,
+##                          max_aG = 30
+##                          )
+##       return(list(UinfoPara=outputMod4))
+##     }
+##   }
+

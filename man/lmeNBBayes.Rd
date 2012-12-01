@@ -11,13 +11,17 @@
 \alias{newCat}
 \alias{getSample}
 \alias{useSamp}
-\alias{inpheatmap}
 \alias{colmeansd}
 \alias{getM}
 \alias{Nuniq}
-\alias{hm}
 \alias{gsLabelnp}
 \alias{repeatAsID}
+\alias{E.KN}
+\alias{adjustPosDef}
+\alias{aggBeta}
+\alias{getS} 
+\alias{multMeta} 
+\alias{rTildeBeta}
 
 \title{
 Fitting a flexible mixed effect negative binomial regression.
@@ -49,11 +53,12 @@ Fitting a flexible mixed effect negative binomial regression.
 
 
 \usage{
-lmeNBBayes(formula,data,ID, B = 105000, burnin = 5000,  
-           printFreq = B, M = NULL,probIndex = FALSE,
-           thin =1,labelnp=NULL, epsilonM = 0.001,
-           para = list(mu_beta = NULL,Sigma_beta = NULL,a_D = 0.01, ib_D = 3,max_aG=30),
-           DP=TRUE,seed=1,Reduce=1)
+lmeNBBayes(formula, data, ID, B = 105000, burnin = 5000,
+                 printFreq = B, M = NULL, probIndex = FALSE, thin = 1,
+                 labelnp = NULL, epsilonM = 1e-04, para = list(mu_beta
+                 = NULL, Sigma_beta = NULL, a_D = 1e-04, ib_D = 3,
+                 max_aG = 30), DP = TRUE, Reduce = 1, thinned.sample =
+                 FALSE)
 }
 
 \arguments{
@@ -112,8 +117,9 @@ If some of these are not specified then the default values discussed in descript
   If \code{DP}=1 then the flexible mixed effect negative binomial regression is fit to the dataset. 
 If \code{DP}=0 then the random effect distribution is assumed to be a single beta distribution.
 }
-\item{seed}{
-  Seed to set.
+\item{thinned.sample}{
+Logical. 
+If true then return only the thinned samples, else returns the entire MCMC sample of size B.
 }
  \item{Reduce}{
 If \code{Reduce}=0 then the target distribution of McMC is full posterior distribution.
@@ -194,16 +200,20 @@ hist(slim(d$gsBASE,d$ID),probability=TRUE,
      breaks=seq(0,1,0.05),col="gray",main="",xlab="beta",
      axes=FALSE,cex.lab=1.3,ylim=c(0,ymax))
 axis(1,seq(0,1,0.2),seq(0,1,0.2),lwd=3,lwd.tick=3,cex.axis=cex.axis)
-axis(2,seq(0,ymax,2),seq(0,ymax,2),lwd=3,lwd.tick=3,las=2,cex.axis=cex.axis)
+axis(2,seq(0,ymax,2),seq(0,ymax,2),
+     lwd=3,lwd.tick=3,las=2,cex.axis=cex.axis)
 ## estimate from Bayesian parametric
 densP <- matrix(NA,nrow=length(useSample),ncol=length(alphasNP))
 for (ialpha in 1 : length(alphasNP))
-   densP[,ialpha] <- dbeta(alphasNP[ialpha],shape1=re.p$aG[useSample],shape2=re.p$rG[useSample])
+   densP[,ialpha] <- dbeta(alphasNP[ialpha],shape1=re.p$aG[useSample],
+                          shape2=re.p$rG[useSample])
 colM.p <- colMeans(densP)
 points(alphasNP,colM.p,type="l",ylim=c(0,ymax),lwd=lwd,col="blue")
-points(alphasNP,colM,type="l",xlab="random effect",ylab="density",ylim=c(0,ymax),lwd=lwd)
+points(alphasNP,colM,type="l",xlab="random effect",
+       ylab="density",ylim=c(0,ymax),lwd=lwd)
 points(alphasNP,q0025,type="l",col="gray30",lty=2,lwd=lwd*0.5)
-## True random effect distribution: for gamma and lognormal r.e., dist'n, the probability parameter of
+## True random effect distribution: for gamma and lognormal r.e., 
+## dist'n, the probability parameter of
 ## the negative binomial is parametrized as p = 1/(g+1).transformed
 ## the following plot plots the p.d.f. of transformed p (not g).
 dmix <- getSample(mod=2,dist="YZ",ts=alphasNP) 

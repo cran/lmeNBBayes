@@ -13,7 +13,7 @@ Given the output of the \code{\link{lmeNBBayes}}, this function estimate the pos
 
 
 \usage{
-dqmix(weightH1, aGs, rGs, alphas = seq(0, 1, 0.01), dens = TRUE) 
+dqmix(weightH1, aGs, rGs, alphas = seq(0, 0.99, 0.01), dens = TRUE) 
 }
 
 \arguments{

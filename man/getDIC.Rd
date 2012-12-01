@@ -14,7 +14,9 @@
 
 
 \usage{
-getDIC(olmeNBBayes, data, ID, useSample)
+getDIC(olmeNBBayes, data, ID, useSample = NULL, focus =c("FG", "G", "aGh.rGh", "para"), 
+		    lower.alpha = 1e-04,
+                 upper.alpha = 0.99999, inc.alpha = 5e-04)
 }
 
 \arguments{
@@ -35,6 +37,19 @@ getDIC(olmeNBBayes, data, ID, useSample)
   same as the length of \code{Y}), containing TRUE or FALSE, indicating
   which samples to be kept or discarded.
 }
+\item{focus}{
+Focused likelihood
+}
+\item{lower.alpha}{
+Internal use only
+}
+\item{upper.alpha}{
+Internal use only
+}
+\item{inc.alpha}{
+Internal use only
+}
+
 }
 
 

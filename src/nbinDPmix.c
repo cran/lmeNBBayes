@@ -33,10 +33,6 @@
 #include <limits.h>
 #include <float.h>
 
-
-
-// =========================================================================================
-
 # include <R.h>
 # include <Rinternals.h>
 # include <Rmath.h>
@@ -477,6 +473,8 @@ int sample(double prob[], const int size)
     {
       if(rN[ih]==1) return(ih);
     }
+  // Returning -1000 if there is an error 
+  return(-1000);
 }
 
 
@@ -524,8 +522,7 @@ SEXP index_b_Bayes_UnexpIncrease(SEXP Y_, SEXP X, SEXP labelnp_, SEXP ID, SEXP B
     }
 
   double lbeta_ar[M],betas[p];
-  double sizePre=0.0,sizeNew=0.0,w=0.0,
-    candi=0.0,yij=0.0,num=0.0,den=0.0;
+  double sizePre=0.0,sizeNew=0.0,w=0.0,num=0.0,den=0.0;
 
   SEXP res = PROTECT(allocVector(VECSXP, 1)); // result is stored in res
   SEXP probI = allocVector(REALSXP, N*B);
@@ -640,8 +637,7 @@ SEXP index_b_Bayes_UnexpDecrease(SEXP Y_, SEXP X, SEXP labelnp_, SEXP ID, SEXP B
     }
 
   double postprob[M],betas[p];
-  double sizePre=0.0,sizeNew=0.0,w=0.0,
-    candi=0.0,yij=0.0,num=0.0,den=0.0;
+  double sizePre=0.0,sizeNew=0.0,w=0.0,num=0.0,den=0.0;
 
   SEXP res = PROTECT(allocVector(VECSXP, 1)); // result is stored in res
   SEXP probI = allocVector(REALSXP, N*B);
@@ -1846,8 +1842,8 @@ SEXP ReduceGibbs(SEXP Y_,          // REAL
   // int h1s[N],h2s[N],js[N];
   double betas[p],canbetas[p],aGs[M],rGs[M],Beta_ar[M]; 
   double vs[M],weightH1[M],postprob[M],D;
-  double sizeij=0.0,cansizeij=0.0,w=0.0,pij=0.0,sizeip_s[N],cansizeip_s[N],
-    candi=0.0,MHrate=0.0,yij=0.0,logLcan=0.0,logL=0.0,num,den,canlogDen=0,logDen=0;
+  double sizeij=0.0,cansizeij=0.0,w=0.0,sizeip_s[N],cansizeip_s[N],
+    candi=0.0,MHrate=0.0,logLcan=0.0,logL=0.0,num,den,canlogDen=0,logDen=0;
   int Nacc=4;
   double att[Nacc], acc[Nacc],can[Nacc];
   for (ih = 0 ; ih < Nacc; ih ++)
@@ -2324,8 +2320,8 @@ SEXP ReduceDmvn(SEXP Y_,          // REAL
   //       the last element of betas is log(D) 
   double betas[p],canbetas[p],aGs[M],rGs[M],Beta_ar[M]; 
   double vs[M],weightH1[M],postprob[M],D;
-  double sizeij=0.0,cansizeij=0.0,w=0.0,pij=0.0,sizeip_s[N],cansizeip_s[N],
-    candi=0.0,canlnD=0.0,MHrate=0.0,yij=0.0,logLcan=0.0,logL=0.0,num,den,canlogDen=0,logDen=0;
+  double sizeij=0.0,cansizeij=0.0,w=0.0,sizeip_s[N],cansizeip_s[N],
+    candi=0.0,canlnD=0.0,MHrate=0.0,logLcan=0.0,logL=0.0,num,den,canlogDen=0,logDen=0;
   const int Nacc = 4; //aG,rG, betas[0],...,betas[p-1],lnD
   double att[Nacc], acc[Nacc],can[Nacc];
 
@@ -2767,10 +2763,10 @@ SEXP Beta1reduce(SEXP Y_,          // REAL
     }
 
   // int h1s[N],h2s[N],js[N];
-  double betas[p],canbetas[p],aG,rG,g1s[N],sizeip_s[N],cansizeip_s[N],Beta_ar;
+  double betas[p],canbetas[p],aG,rG,sizeip_s[N],cansizeip_s[N],Beta_ar;
   // double vs[M],weightH1[M],postprob[M],g2s[N];
-  double sizeij=0.0,cansizeij=0.0,w=0.0,pij=0.0,logLcan=0,logL=0,
-    candi=0.0,MHrate=0.0,yij=0.0,num=0.0,den=0.0,logDen=0.0,canlogDen=0.0;
+  double sizeij=0.0,cansizeij=0.0,logLcan=0,logL=0,
+    candi=0.0,MHrate=0.0,num=0.0,den=0.0,logDen=0.0,canlogDen=0.0;
   const int Nacc= 2 + 1 ; // aG rG, beta
   double att[Nacc], acc[Nacc],can[Nacc];
   for (ih = 0 ; ih < Nacc; ih ++)
@@ -4265,7 +4261,7 @@ SEXP Beta24(SEXP Y_,          // REAL
   int h1s[N],h2s[N];
   double sizeij=0.0,cansizeij=0.0,w=0.0,canpij=0.0,pij=0.0,
     candi=0.0,MHrate=0.0,yij=0.0,sumgs=0.0;
-  double  weipro=0.0,qG2=0.0,D=0.0;
+  double  weipro=0.0,D=0.0;
   double att[Nacc], acc[Nacc],can[Nacc];
   for (ih = 0 ; ih < Nacc; ih ++)
     {
@@ -4774,7 +4770,7 @@ SEXP Beta24Unif(SEXP Y_,          // REAL
   int h1s[N],h2s[N];
   double sizeij=0.0,cansizeij=0.0,w=0.0,canpij=0.0,pij=0.0,
     candi=0.0,MHrate=0.0,yij=0.0,sumgs=0.0;
-  double  weipro=0.0,qG2=0.0,D=0.0;
+  double  weipro=0.0,D=0.0;
   double att[Nacc], acc[Nacc],can[Nacc];
   double logLcan, logL; // focused likelihood values
   for (ih = 0 ; ih < Nacc; ih ++)

@@ -190,8 +190,7 @@ The DSMB reviews can be specified by the input \code{rev}.
 
 
 \references{
-Kondo, Y. and Zhao, Y., A Flexible Mixed Effect Negative Binomial Regression for Detecting
-Abrupt Increase in MRI Lesion Counts in Multiple Sclerosis Patients.
+Kondo, Y., Zhao, Y. and Petkau, A.J., "A flexible mixed effect negative binomial regression model for detecting unusual increases in MRI lesion counts in individual multiple sclerosis patients".
 }
 \author{
 Kondo, Y.

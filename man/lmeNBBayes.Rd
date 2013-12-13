@@ -192,8 +192,7 @@ adjusted during the burn-in period to have the acceptance rates range between 0.
 
 
 \references{
-Kondo, Y. and Zhao, Y., A Flexible Mixed Effect Negative Binomial Regression for Detecting
-Abrupt Increase in MRI Lesion Counts in Multiple Sclerosis Patients.
+Kondo, Y., Zhao, Y. and Petkau, A.J., "A flexible mixed effect negative binomial regression model for detecting unusual increases in MRI lesion counts in individual multiple sclerosis patients".
 }
 \author{
 Kondo, Y.

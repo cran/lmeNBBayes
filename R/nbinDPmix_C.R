@@ -357,7 +357,7 @@ index.batch.Bayes <- function(data,labelnp,ID,olmeNBB,thin=NULL,printFreq=10^5,u
     }
     
     re <- matrix(re[[1]],nrow=B,ncol=Npat,byrow=TRUE)
-    colnames(re) <- temID
+    colnames(re) <- unique(temID)
     rownames(re) <- paste("sim",1:B,sep="")
     ## the labelnp of patients only with 1 (new scans) labels are replaced by all 0 (old scans)
     patwonew <- which(as.numeric(tapply((labelnp==0),ID,sum)==0)==1)

@@ -110,10 +110,9 @@ STEP 4: Given the estimated expected coefficients and the estimated expected ran
 evaluate \eqn{D(\bar{P})}{D(P.bar)} by integrating the conditional likelihood given random effects with respect to the estimated expected random effect density from STEP 3.
 }
 \references{
-Kondo, Y. and Zhao, Y., A Flexible Mixed Effect Negative Binomial Regression for Detecting
-Abrupt Increase in MRI Lesion Counts in Multiple Sclerosis Patients.
+Kondo, Y., Zhao, Y. and Petkau, A.J., "A flexible mixed effect negative binomial regression model for detecting unusual increases in MRI lesion counts in individual multiple sclerosis patients".
 
-Spiegelhalter, David J.; Best, Nicola G.; Carlin, Bradley P.; van der Linde, Angelika (2002). "Bayesian measures of model complexity and fit (with discussion)". Journal of the Royal Statistical Society, Series B 64 (4): 583-639.
+Spiegelhalter, D.J.; Best, N. G.; Carlin, B.P., van der Linde, A. (2002). "Bayesian measures of model complexity and fit (with discussion)". Journal of the Royal Statistical Society, Series B 64 (4): 583-639.
 }
 \author{
 Kondo, Y.

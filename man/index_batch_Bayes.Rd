@@ -2,8 +2,8 @@
 \alias{index.batch.Bayes}
 \alias{index.YZ}
 \alias{index.b.each}
-\alias{condProbCI}
 \alias{prIndex}
+\alias{condProbCI}
 
 \title{
 Compute the conditional probability index.
@@ -17,7 +17,7 @@ Compute the posterior interval estimate of the conditional probability index for
 
 \usage{
 
-index.batch.Bayes(data,labelnp,ID,olmeNBBayes,thin=NULL,printFreq=10^5,unExpIncrease=TRUE)
+index.batch.Bayes(data,labelnp,ID,olmeNBB,thin=NULL,printFreq=10^5,unExpIncrease=TRUE)
 
 }
 
@@ -34,7 +34,7 @@ The \code{labelnp} used in \code{index.batch.Bayes} does not have to be the same
 \item{ID}{See the description in \code{\link{lmeNBBayes}}.
 The \code{ID} used in \code{index.batch.Bayes} does not have to be the same as the \code{ID} used in \code{nbinDPmix}.
 }
-\item{olmeNBBayes}{The output of the function \code{\link{lmeNBBayes}}.}
+\item{olmeNBB}{The output of the function \code{\link{lmeNBBayes}}.}
 
 \item{thin}{The frequency of thinning}
 

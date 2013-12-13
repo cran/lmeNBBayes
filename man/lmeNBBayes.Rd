@@ -5,23 +5,21 @@
 \alias{plotbeta}
 \alias{plotnbinom}
 \alias{slim}
-\alias{UsedPara}
 \alias{plotGs}
-\alias{paralnorm}
 \alias{newCat}
-\alias{getSample}
 \alias{useSamp}
+\alias{adjustPosDef}
 \alias{colmeansd}
 \alias{getM}
 \alias{Nuniq}
-\alias{gsLabelnp}
+\alias{getSNormUnblind}
 \alias{repeatAsID}
+\alias{piM}
+\alias{lnpara}
+\alias{int.M}
 \alias{E.KN}
-\alias{adjustPosDef}
-\alias{aggBeta}
-\alias{getS} 
-\alias{multMeta} 
-\alias{rTildeBeta}
+
+
 
 \title{
 Fitting a flexible mixed effect negative binomial regression.
@@ -53,12 +51,13 @@ Fitting a flexible mixed effect negative binomial regression.
 
 
 \usage{
-lmeNBBayes(formula, data, ID, B = 105000, burnin = 5000,
-                 printFreq = B, M = NULL, probIndex = FALSE, thin = 1,
-                 labelnp = NULL, epsilonM = 1e-04, para = list(mu_beta
-                 = NULL, Sigma_beta = NULL, a_D = 1e-04, ib_D = 3,
-                 max_aG = 30), DP = TRUE, Reduce = 1, thinned.sample =
-                 FALSE)
+
+lmeNBBayes(formula,data, ID, B = 105000, burnin = 5000,  
+           printFreq = B, M = NULL, probIndex = FALSE,
+           thin =1,labelnp=NULL, epsilonM = 1e-4, 
+	   para = list(mu_beta = NULL,Sigma_beta = NULL,
+	   	  max_aG=30,mu_lnD=NULL,sd_lnD=NULL),
+           DP=TRUE,thinned.sample=FALSE, proposalSD = NULL)
 }
 
 \arguments{
@@ -90,6 +89,7 @@ lmeNBBayes(formula, data, ID, B = 105000, burnin = 5000,
  \item{M}{
    A truncation value for the infinite mixture of beta distribution. \code{M} determines the number of mass points used in the approximation of the DP mixture. If it is NULL, M is selected so that the amount of probability assigned to the final mass point is expected to be \code{epsilonM}. The specification of \code{M} is unnecessary if \code{DP}=0.
  }
+
  \item{probIndex}{
    Logical, if it is \code{TRUE} then the conditional probability index
   is computed for each patient at every thinning after discarding
@@ -110,22 +110,45 @@ lmeNBBayes(formula, data, ID, B = 105000, burnin = 5000,
  \item{para}{
 A list containing hyperparameter values.  
 If \code{DP}=0 then the followings must be specified: \code{mu_beta} (a vector of length \emph{p}), \code{Sigma_beta} (a \emph{p} by \emph{p} covariance matrix) and \code{max_aG} (a positive scaler).
-If \code{DP}=1 then in addition to the above parameters,\code{a_D} (positive scaler) \code{ib_D} (positive scaler) must be specified. 
+If \code{DP}=1 then in addition to the above parameters,\code{mu_lnD} (positive scaler) \code{sd_lnD} (positive scaler) must be specified. 
 If some of these are not specified then the default values discussed in description are used. 
 }
 \item{DP}{
   If \code{DP}=1 then the flexible mixed effect negative binomial regression is fit to the dataset. 
 If \code{DP}=0 then the random effect distribution is assumed to be a single beta distribution.
 }
+
 \item{thinned.sample}{
 Logical. 
 If true then return only the thinned samples, else returns the entire MCMC sample of size B.
 }
- \item{Reduce}{
-If \code{Reduce}=0 then the target distribution of McMC is full posterior distribution.
-If \code{Reduce}=1 then the target distribution of McMC is a partially marginalized posterior distribution, which integrate out the random effects.
-We recommend the use of the partially marginalized posterior distribution because it is computationally faster and the McMC samples are less correlated.
+\item{proposalSD}{
+List object containing two list objects \code{min} and \code{max}, which contain minimum and maximum values of the proposal standard deviations.
+
+If \code{DP}=0 then a list object \code{min} (\code{max}) must contains 3 elements corresponding to minimum (maximum) values of the proposal standard deviation of aG, rG and beta. See details for beta.
+
+If \code{DP}=1 then a list object \code{min} (\code{max}) must contains 4 elements corresponding to minimum (maximum) values of the proposal standard deviation of aG, rG, beta and ln D. See details for beta.
+
+        
 }
+
+}
+
+\details{
+For the parameters with non-conjugate priors beta, D, aG and bG, the
+Metropolis Hasting (MH) algorithm is employed to sample from their full conditional distributions.
+For D, aG, bG, MH algorithm is
+performed separately with a normal proposal distribution, where its proposal variance
+is tuned during the burn-in to have the acceptance rates range between 0.2 and 0.6.
+One can adjust the minimum and maximum of the proposal sd via the proposalSD arguments.
+For beta, we found that updating
+each regression coefficient with separate MH algorithm resulted in
+poor mixing in the Markov chain when high correlation is assumed in some
+of beta in our prior.
+Therefore, MH algorithm is performed simultaneously for beta and a MVN proposal distribution is employed with
+\emph{a}\emph{Sigma} as its proposal covariance matrix, where \emph{Sigma} is the
+covariance of a prior for \emph{beta} and \emph{a} is a tuning scaler
+adjusted during the burn-in period to have the acceptance rates range between 0.2 and 0.6.
 }
 
 
@@ -147,78 +170,7 @@ Kondo, Y.
 \examples{
 
 \dontrun{
-## Generate samples as in manuscript at review 1
-d <- getSample(rev=1,iseed=1,mod=0,dist="YZ")
-burnin <- 5000	
-thin <- 10
-B <- 105000
-## Create a vector indicating which sample to keep and discard
-useSample <- useSamp(thin,burnin,B)
-## nonparametric Bayesian procedure
-re <- lmeNBBayes(formula=Y~1+X2,             
-             data=d,         
-             ID=d$ID,        
-             B = B, 
-	     printFreq=20000,
-             burnin = burnin,
-	     probIndex=0,
-             labelnp=d$labelnp)
-## compute DIC to assess the fit of nonparametric Bayesian procedure
-getDIC(re,data=d,ID=d$ID,useSample=useSample)
-
-## Parametric Bayesian procedure                
-re.p <- lmeNBBayes(formula=Y~1+X2,             
-             data=d,         
-               ID=d$ID,        
-               B = B, 
-	       printFreq=20000,
-               burnin = burnin,
-	       probIndex=0,
-               labelnp=d$labelnp,
-               DP=0)
-## compute DIC to assess the fit of parametric Bayesian procedure
-getDIC(re.p,data=d,ID=d$ID,useSample=useSample)
-
-alphasNP.inc <- 0.001
-alphasNP <- seq(0.001,0.99,alphasNP.inc)
-cex.axis <- 1.76
-lwd <- 2.7
-ymax <- 6
-## the density of the sampled random effect distribution
-qM <- dqmix(
-            weightH1 = re$weightH1[useSample,],
-            aGs = re$aGs[useSample,],
-            rGs = re$rGs[useSample,],
-            alphas=alphasNP,dens=TRUE
-            )[[1]]
-
-## plot of sampled random effect distribution
-colM <- colMeans(qM)
-q0025 <- apply(qM,2,quantile,prob=0.025)
-q0975 <- apply(qM,2,quantile,prob=0.975)
-hist(slim(d$gsBASE,d$ID),probability=TRUE,
-     breaks=seq(0,1,0.05),col="gray",main="",xlab="beta",
-     axes=FALSE,cex.lab=1.3,ylim=c(0,ymax))
-axis(1,seq(0,1,0.2),seq(0,1,0.2),lwd=3,lwd.tick=3,cex.axis=cex.axis)
-axis(2,seq(0,ymax,2),seq(0,ymax,2),
-     lwd=3,lwd.tick=3,las=2,cex.axis=cex.axis)
-## estimate from Bayesian parametric
-densP <- matrix(NA,nrow=length(useSample),ncol=length(alphasNP))
-for (ialpha in 1 : length(alphasNP))
-   densP[,ialpha] <- dbeta(alphasNP[ialpha],shape1=re.p$aG[useSample],
-                          shape2=re.p$rG[useSample])
-colM.p <- colMeans(densP)
-points(alphasNP,colM.p,type="l",ylim=c(0,ymax),lwd=lwd,col="blue")
-points(alphasNP,colM,type="l",xlab="random effect",
-       ylab="density",ylim=c(0,ymax),lwd=lwd)
-points(alphasNP,q0025,type="l",col="gray30",lty=2,lwd=lwd*0.5)
-## True random effect distribution: for gamma and lognormal r.e., 
-## dist'n, the probability parameter of
-## the negative binomial is parametrized as p = 1/(g+1).transformed
-## the following plot plots the p.d.f. of transformed p (not g).
-dmix <- getSample(mod=2,dist="YZ",ts=alphasNP) 
-points(alphasNP,dmix,type="l",col="red",lwd=lwd) ## true
-
+## coming soon
 }
 
 }

@@ -1,13 +1,14 @@
 
 useDynLib(lmeNBBayes)
 
-export("dqmix","lmeNBBayes","getDIC","index.batch.Bayes","multMeta",
-       "pointsgamma","plotgamma","plotbeta","plotnbinom","slim","UsedPara","plotGs","newCat",
+export("dqmix","lmeNBBayes","getDIC","index.batch.Bayes",
+       "pointsgamma","plotgamma","plotbeta","plotnbinom","slim",
+       "plotGs","newCat",
        "useSamp","adjustPosDef",
-       "colmeansd","getM","Nuniq",
-       "gsLabelnp","repeatAsID",
-       "index.YZ","index.b.each",
-       "E.KN","rTildeBeta","getS","aggBeta",
+       "colmeansd","getM","Nuniq","getSNormUnblind",
+       "repeatAsID",
+       "index.YZ","index.b.each","piM","lnpara","int.M",
+       "E.KN",
        "print.LinearMixedEffectNBBayes","prIndex","condProbCI",
        "print.IndexBatch")
 	

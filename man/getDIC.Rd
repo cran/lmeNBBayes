@@ -14,13 +14,13 @@
 
 
 \usage{
-getDIC(olmeNBBayes, data, ID, useSample = NULL, focus =c("FG", "G", "aGh.rGh", "para"), 
-		    lower.alpha = 1e-04,
-                 upper.alpha = 0.99999, inc.alpha = 5e-04)
+getDIC(olmeNBB, data,
+                  ID, useSample=NULL,focus = c("FG","G","aGh.rGh","para"), 
+                  lower.alpha=0.0001,upper.alpha=0.99999,inc.alpha=0.0005)
 }
 
 \arguments{
-  \item{olmeNBBayes}{
+  \item{olmeNBB}{
     The output of \code{nbinDP}.
   }
   \item{data}{
